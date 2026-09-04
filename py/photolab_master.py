@@ -169,10 +169,18 @@ class PhotoLabMasterSuite:
     STOCKS = [
         "None",
         "Kodak Portra 400",
-        "Kodak Tri-X 400 (B&W)",
+        "Kodak Portra 800",
+        "Kodak Gold 200",
         "Kodak CineStill 800T",
+        "Kodak Vision3 500T",
+        "Kodak Tri-X 400 (B&W)",
+        "Ilford HP5 Plus (B&W)",
         "Fuji Pro 400H",
+        "Fuji Velvia 50",
+        "Fuji Superia 400",
         "Kodachrome 64",
+        "Agfa Vista 200",
+        "Polaroid 600",
     ]
 
     @classmethod
@@ -206,6 +214,8 @@ class PhotoLabMasterSuite:
                 "enable_diffusion": ("BOOLEAN", {"default": False}),
                 "enable_frequency_retouch": ("BOOLEAN", {"default": False}),
                 "enable_sss": ("BOOLEAN", {"default": False}),
+                "enable_auto_wb": ("BOOLEAN", {"default": False}),
+                "enable_auto_color": ("BOOLEAN", {"default": False}),
                 "enable_relighting": ("BOOLEAN", {"default": False}),
                 "enable_lut": ("BOOLEAN", {"default": False}),
                 "enable_film_stock": ("BOOLEAN", {"default": False}),
@@ -261,6 +271,12 @@ class PhotoLabMasterSuite:
                 "light_color_r": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.05}),
                 "light_color_g": ("FLOAT", {"default": 0.95, "min": 0.0, "max": 2.0, "step": 0.05}),
                 "light_color_b": ("FLOAT", {"default": 0.88, "min": 0.0, "max": 2.0, "step": 0.05}),
+
+                # --- Auto White Balance & Auto Color Engine ---
+                "auto_wb_mode": (["Robust Neutral", "Gray World", "White Patch"], {"default": "Robust Neutral"}),
+                "auto_wb_strength": ("FLOAT", {"default": 0.80, "min": 0.0, "max": 1.0, "step": 0.05}),
+                "auto_color_mode": (["Full Dynamic Balance", "Luma Contrast Only", "Auto Vibrance"], {"default": "Full Dynamic Balance"}),
+                "auto_color_strength": ("FLOAT", {"default": 0.75, "min": 0.0, "max": 1.0, "step": 0.05}),
 
                 # --- 5. 3D .cube LUT Engine & Film Stock Presets ---
                 "lut_file": (luts, {"default": "None"}),
@@ -364,6 +380,103 @@ class PhotoLabMasterSuite:
         out = F.conv2d(out, k_h, groups=c)
         out = F.pad(out, (pad, pad, 0, 0), mode="reflect")
         return F.conv2d(out, k_w, groups=c)
+
+    def _apply_auto_white_balance(self, img: torch.Tensor, mode: str, strength: float) -> torch.Tensor:
+        """
+        Illuminant estimation and chromaticity neutralization.
+        img: [B, H, W, 3] in [0.0, 1.0]
+        """
+        if strength <= 0.001:
+            return img
+
+        B, H, W, C = img.shape
+        img_clamped = torch.clamp(img, 0.0, 1.0)
+        r = img_clamped[..., 0]
+        g = img_clamped[..., 1]
+        b = img_clamped[..., 2]
+        luma = 0.2126 * r + 0.7152 * g + 0.0722 * b
+
+        if mode == "White Patch":
+            # 99th percentile brightest pixels
+            flat_luma = luma.reshape(B, -1)
+            q99 = torch.quantile(flat_luma, 0.99, dim=-1, keepdim=True).view(B, 1, 1)
+            mask = (luma >= q99).float().unsqueeze(-1)
+            mask_sum = mask.sum(dim=(1, 2), keepdim=True).clamp(min=1.0)
+            white_rgb = (img_clamped * mask).sum(dim=(1, 2), keepdim=True) / mask_sum
+            white_max = white_rgb.max(dim=-1, keepdim=True).values.clamp(min=1e-5)
+            raw_gains = (white_max / white_rgb.clamp(min=1e-5))
+        elif mode == "Gray World":
+            # Midtone mask to exclude deep blacks and blown whites
+            mask = ((luma > 0.05) & (luma < 0.92)).float().unsqueeze(-1)
+            mask_sum = mask.sum(dim=(1, 2), keepdim=True)
+            mask = torch.where(mask_sum < 50.0, torch.ones_like(mask), mask)
+            mask_sum = mask.sum(dim=(1, 2), keepdim=True).clamp(min=1.0)
+            mean_rgb = (img_clamped * mask).sum(dim=(1, 2), keepdim=True) / mask_sum
+            mean_target = mean_rgb.mean(dim=-1, keepdim=True).clamp(min=1e-5)
+            raw_gains = mean_target / mean_rgb.clamp(min=1e-5)
+        else:  # "Robust Neutral" (Minkowski p=4 norm on midtones)
+            mask = ((luma > 0.05) & (luma < 0.92)).float().unsqueeze(-1)
+            mask_sum = mask.sum(dim=(1, 2), keepdim=True)
+            mask = torch.where(mask_sum < 50.0, torch.ones_like(mask), mask)
+            mask_sum = mask.sum(dim=(1, 2), keepdim=True).clamp(min=1.0)
+            p_pow = torch.pow(img_clamped.clamp(min=1e-6), 4.0) * mask
+            k_mink = torch.pow((p_pow.sum(dim=(1, 2), keepdim=True) / mask_sum).clamp(min=1e-6), 0.25)
+            target = k_mink.mean(dim=-1, keepdim=True).clamp(min=1e-5)
+            raw_gains = target / k_mink.clamp(min=1e-5)
+
+        # Rec.709 luminance preservation so overall exposure is locked
+        luma_norm = (0.2126 * raw_gains[..., 0] + 0.7152 * raw_gains[..., 1] + 0.0722 * raw_gains[..., 2]).unsqueeze(-1)
+        gains = raw_gains / luma_norm.clamp(min=1e-5)
+
+        balanced = torch.clamp(img * gains, 0.0, 1.0)
+        return torch.lerp(img, balanced, strength)
+
+    def _apply_auto_color_correction(self, img: torch.Tensor, mode: str, strength: float) -> torch.Tensor:
+        """
+        Automated dynamic range, contrast stretching, and color balance.
+        img: [B, H, W, 3] in [0.0, 1.0]
+        """
+        if strength <= 0.001:
+            return img
+
+        B, H, W, C = img.shape
+        img_clamped = torch.clamp(img, 0.0, 1.0)
+
+        if mode == "Full Dynamic Balance":
+            # Per-channel percentile stretch (Photoshop Auto Levels/Color)
+            channels = []
+            for c in range(3):
+                flat = img_clamped[..., c].reshape(B, -1)
+                q_low = torch.quantile(flat, 0.005, dim=-1).view(B, 1, 1)
+                q_high = torch.quantile(flat, 0.995, dim=-1).view(B, 1, 1)
+                span = (q_high - q_low).clamp(min=1e-4)
+                stretched = torch.clamp((img_clamped[..., c] - q_low) / span, 0.0, 1.0)
+                channels.append(stretched)
+            corrected = torch.stack(channels, dim=-1)
+        elif mode == "Luma Contrast Only":
+            # Luminance-only contrast stretch, strictly preserving hue ratios
+            luma = 0.2126 * img_clamped[..., 0] + 0.7152 * img_clamped[..., 1] + 0.0722 * img_clamped[..., 2]
+            flat = luma.reshape(B, -1)
+            q_low = torch.quantile(flat, 0.005, dim=-1).view(B, 1, 1)
+            q_high = torch.quantile(flat, 0.995, dim=-1).view(B, 1, 1)
+            span = (q_high - q_low).clamp(min=1e-4)
+            luma_stretched = torch.clamp((luma - q_low) / span, 0.0, 1.0)
+            gain = (luma_stretched / luma.clamp(min=1e-5)).unsqueeze(-1)
+            corrected = torch.clamp(img_clamped * gain, 0.0, 1.0)
+        else:  # "Auto Vibrance"
+            # Adaptive saturation boost protecting already saturated tones
+            r = img_clamped[..., 0]
+            g = img_clamped[..., 1]
+            b = img_clamped[..., 2]
+            luma = (0.2126 * r + 0.7152 * g + 0.0722 * b).unsqueeze(-1)
+            max_c = img_clamped.max(dim=-1, keepdim=True).values
+            min_c = img_clamped.min(dim=-1, keepdim=True).values
+            sat = (max_c - min_c) / max_c.clamp(min=1e-5)
+            # Inverse saturation weight: unsaturated areas get boosted more
+            vib_boost = 1.0 + (1.0 - sat) * 0.7
+            corrected = torch.clamp(torch.lerp(luma, img_clamped, vib_boost), 0.0, 1.0)
+
+        return torch.lerp(img, corrected, strength)
 
     def _normalize_mask(self, mask: torch.Tensor, b: int, h: int, w: int, device: torch.device) -> torch.Tensor:
         """Standardizes masks to [B, 1, H, W] float32 tensor, resolving 5D/4D/3D/2D variants."""
@@ -737,6 +850,8 @@ class PhotoLabMasterSuite:
         enable_diffusion=False,
         enable_frequency_retouch=False,
         enable_sss=False,
+        enable_auto_wb=False,
+        enable_auto_color=False,
         enable_relighting=False,
         enable_lut=False,
         enable_film_stock=False,
@@ -778,6 +893,10 @@ class PhotoLabMasterSuite:
         light_color_r=1.0,
         light_color_g=0.95,
         light_color_b=0.88,
+        auto_wb_mode="Robust Neutral",
+        auto_wb_strength=0.80,
+        auto_color_mode="Full Dynamic Balance",
+        auto_color_strength=0.75,
         lut_file="None",
         lut_strength=1.0,
         film_stock="Kodak Portra 400",
@@ -876,7 +995,7 @@ class PhotoLabMasterSuite:
             (enable_dof and dof_use_depth)
             or (enable_atmosphere and (haze_use_depth or light_wrap_use_depth))
             or (enable_relighting and relight_use_depth)
-            or (auto_mask in ("SAM Auto-Subject", "Depth Foreground Isolation"))
+            or (enable_mask and auto_mask in ("SAM Auto-Subject", "Depth Foreground Isolation"))
         )
 
         depth_mask = None
@@ -1144,6 +1263,17 @@ class PhotoLabMasterSuite:
 
             img = torch.clamp((x_bchw + sss_glow).permute(0, 2, 3, 1), 0.0, 1.0)
 
+        # -------------------------------------------------------------
+        # STEP 4B: Auto White Balance (Illuminant Neutralization)
+        # -------------------------------------------------------------
+        if enable_auto_wb and auto_wb_strength > 0.001:
+            img = self._apply_auto_white_balance(img, auto_wb_mode, auto_wb_strength)
+
+        # -------------------------------------------------------------
+        # STEP 4C: Auto Color & Dynamic Range (Auto Levels / Vibrance)
+        # -------------------------------------------------------------
+        if enable_auto_color and auto_color_strength > 0.001:
+            img = self._apply_auto_color_correction(img, auto_color_mode, auto_color_strength)
 
         # -------------------------------------------------------------
         # STEP 5: Studio Relighting (3D Depth-Aware or 2D Radial Inverse-Square Falloff)
@@ -1182,20 +1312,113 @@ class PhotoLabMasterSuite:
         # -------------------------------------------------------------
         if enable_film_stock and film_stock != "None" and stock_mix > 0.001:
             img_c = torch.clamp(img, 0.0, 1.0)
-            r, g, b = img_c[..., 0], img_c[..., 1], img_c[..., 2]
+            r = img_c[..., 0].clamp(min=1e-6)
+            g = img_c[..., 1].clamp(min=1e-6)
+            b = img_c[..., 2].clamp(min=1e-6)
+            luma = (0.2126 * r + 0.7152 * g + 0.0722 * b).unsqueeze(-1)
             if film_stock == "Kodak Portra 400":
-                graded = torch.stack([torch.pow(r, 0.94) * 1.03, torch.pow(g, 0.98) * 0.99, torch.pow(b, 1.04) * 0.95], dim=-1)
-            elif film_stock == "Kodak Tri-X 400 (B&W)":
-                gray = (0.25 * r + 0.60 * g + 0.15 * b - 0.5) * 1.35 + 0.5
-                graded = torch.clamp(gray, 0.0, 1.0).unsqueeze(-1).repeat(1, 1, 1, 3)
+                # Warm skin tones, lifted shadows, soft saturation
+                graded = torch.stack([
+                    torch.pow(r, 0.93) * 1.04,
+                    torch.pow(g, 0.97) * 0.995,
+                    torch.pow(b, 1.06) * 0.93,
+                ], dim=-1)
+                graded = torch.lerp(luma, graded, 1.05)
+            elif film_stock == "Kodak Portra 800":
+                # Pushed Portra — warmer, grainier, slightly desaturated mids
+                graded = torch.stack([
+                    torch.pow(r, 0.90) * 1.06,
+                    torch.pow(g, 0.95) * 0.99,
+                    torch.pow(b, 1.10) * 0.90,
+                ], dim=-1)
+                graded = torch.lerp(luma, graded, 1.08)
+            elif film_stock == "Kodak Gold 200":
+                # Saturated yellows, warm shift, punchy contrast
+                graded = torch.stack([
+                    torch.pow(r, 0.88) * 1.08,
+                    torch.pow(g, 0.94) * 1.02,
+                    torch.pow(b, 1.08) * 0.88,
+                ], dim=-1)
+                graded = torch.lerp(luma, graded, 1.15)
             elif film_stock == "Kodak CineStill 800T":
-                graded = torch.stack([torch.pow(r, 1.05) * 0.97, torch.pow(g, 0.98) * 1.02, torch.pow(b, 0.88) * 1.12], dim=-1)
+                # Tungsten-balanced: warm push under tungsten, halation-prone reds
+                # Under tungsten light (warm src): slight desaturation, orange cast
+                # Under daylight: strong orange/red cast (tungsten correction inversion)
+                graded = torch.stack([
+                    torch.pow(r, 0.88) * 1.10,
+                    torch.pow(g, 0.96) * 0.98,
+                    torch.pow(b, 1.12) * 0.82,
+                ], dim=-1)
+                graded = torch.lerp(luma, graded, 1.0)
+            elif film_stock == "Kodak Vision3 500T":
+                # Cinema negative: controlled contrast, teal-orange split, fine grain
+                graded = torch.stack([
+                    torch.pow(r, 0.90) * 1.05,
+                    torch.pow(g, 0.97) * 1.00,
+                    torch.pow(b, 1.05) * 0.90,
+                ], dim=-1)
+                shadow_lift = torch.clamp(0.06 - img_c * 0.06, 0.0, 0.06)
+                graded = graded + shadow_lift
+                graded = torch.lerp(luma, graded, 1.10)
+            elif film_stock == "Kodak Tri-X 400 (B&W)":
+                # Orthochromatic response: boosted contrast, deep blacks, bright skies
+                mono = 0.299 * r + 0.587 * g + 0.114 * b
+                curve = torch.sigmoid((mono - 0.5) * 6.0) * 0.95 + 0.025
+                graded = curve.unsqueeze(-1).repeat(1, 1, 1, 3)
+            elif film_stock == "Ilford HP5 Plus (B&W)":
+                # Finer grain than Tri-X, wider dynamic range, natural tones
+                mono = 0.260 * r + 0.620 * g + 0.120 * b
+                curve = torch.pow(mono.clamp(min=1e-6), 0.92) * 0.98
+                graded = curve.unsqueeze(-1).repeat(1, 1, 1, 3)
             elif film_stock == "Fuji Pro 400H":
-                graded = torch.stack([torch.pow(r, 0.98) * 0.98, torch.pow(g, 0.92) * 1.04, torch.pow(b, 0.95) * 1.02], dim=-1)
+                # Cool pastel tones, lifted shadows, slight green-cyan bias
+                graded = torch.stack([
+                    torch.pow(r, 1.02) * 0.96,
+                    torch.pow(g, 0.94) * 1.03,
+                    torch.pow(b, 0.97) * 1.04,
+                ], dim=-1)
+                graded = torch.lerp(luma, graded, 1.05)
+            elif film_stock == "Fuji Velvia 50":
+                # Hyper-saturated slide film: electric greens, deep cyans, vivid reds
+                sat_boost = torch.clamp(torch.lerp(luma, img_c, 1.55), min=1e-6, max=1.0)
+                graded = torch.stack([
+                    torch.pow(sat_boost[..., 0], 0.90) * 1.02,
+                    torch.pow(sat_boost[..., 1], 0.86) * 1.04,
+                    torch.pow(sat_boost[..., 2], 0.94) * 1.00,
+                ], dim=-1)
+            elif film_stock == "Fuji Superia 400":
+                # Consumer film: warm-neutral, slightly green mids, modest contrast
+                graded = torch.stack([
+                    torch.pow(r, 0.97) * 1.01,
+                    torch.pow(g, 0.92) * 1.04,
+                    torch.pow(b, 1.00) * 0.97,
+                ], dim=-1)
+                graded = torch.lerp(luma, graded, 1.08)
             elif film_stock == "Kodachrome 64":
-                temp = torch.stack([(r - 0.5) * 1.25 + 0.52, (g - 0.5) * 1.20 + 0.49, (b - 0.5) * 1.15 + 0.50], dim=-1)
-                l = (0.299 * temp[..., 0] + 0.587 * temp[..., 1] + 0.114 * temp[..., 2]).unsqueeze(-1)
-                graded = torch.lerp(l, temp, 1.22)
+                # Iconic saturated reversal film: deep reds, golden skin, rich contrast
+                temp = torch.stack([
+                    (r - 0.5) * 1.38 + 0.54,
+                    (g - 0.5) * 1.28 + 0.49,
+                    (b - 0.5) * 1.18 + 0.47,
+                ], dim=-1)
+                graded = torch.lerp(luma, temp, 1.30)
+            elif film_stock == "Agfa Vista 200":
+                # Warm magenta bias, punchy consumer look, slightly shifted greens
+                graded = torch.stack([
+                    torch.pow(r, 0.93) * 1.05,
+                    torch.pow(g, 0.98) * 0.97,
+                    torch.pow(b, 1.04) * 0.96,
+                ], dim=-1)
+                graded = torch.lerp(luma, graded, 1.12)
+            elif film_stock == "Polaroid 600":
+                # High contrast, colour bleed, warm faded highlights, milky lifted blacks
+                lifted = img_c * 0.88 + 0.06
+                graded = torch.stack([
+                    torch.pow(lifted[..., 0], 0.88) * 1.08,
+                    torch.pow(lifted[..., 1], 0.96) * 0.98,
+                    torch.pow(lifted[..., 2], 1.04) * 0.92,
+                ], dim=-1)
+                graded = torch.lerp(luma, graded, 1.10)
             else:
                 graded = img_c
             img = torch.lerp(img, torch.clamp(graded, 0.0, 1.0), stock_mix)

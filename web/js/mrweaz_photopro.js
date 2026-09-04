@@ -45,6 +45,15 @@ function syncNodeWidgetValue(node, name, val) {
     }
 }
 
+function isPhotoLabMasterNode(node) {
+    if (!node) return false;
+    const typeStr = (node.comfyClass || node.type || node.title || "").toString();
+    return typeStr.includes("PhotoLabMasterSuite") || 
+           typeStr.includes("PhotoLab · Master Suite") ||
+           typeStr.includes("MrWeaz - PhotoLab") ||
+           typeStr.includes("MrWeazPhotoLab");
+}
+
 app.registerExtension({
     name: "MrWeaz.PhotoLabMasterUI",
 
@@ -68,34 +77,57 @@ app.registerExtension({
             this.nickname = "MrWeaz - PhotoLab";
             const res = origConfigure?.apply(this, arguments);
             setupPhotoLabMasterUI(this);
+            if (typeof this._syncPhotoLabDOM === "function") {
+                this._syncPhotoLabDOM();
+            }
+            requestAnimationFrame(() => {
+                if (typeof this._syncPhotoLabDOM === "function") {
+                    this._syncPhotoLabDOM();
+                }
+                this.setDirtyCanvas?.(true, true);
+            });
             return res;
         };
     },
 
-
     async nodeCreated(node) {
-        setupPhotoLabMasterUI(node);
+        if (isPhotoLabMasterNode(node)) {
+            setupPhotoLabMasterUI(node);
+        }
     },
 
     async loadedGraphNode(node) {
-        setupPhotoLabMasterUI(node);
+        if (isPhotoLabMasterNode(node)) {
+            setupPhotoLabMasterUI(node);
+            if (typeof node._syncPhotoLabDOM === "function") {
+                node._syncPhotoLabDOM();
+            }
+            requestAnimationFrame(() => {
+                if (typeof node._syncPhotoLabDOM === "function") {
+                    node._syncPhotoLabDOM();
+                }
+                node.setDirtyCanvas?.(true, true);
+            });
+        }
     }
 });
 
 function setupPhotoLabMasterUI(node) {
-    if (!node || node._photolab_ui_attached) return;
-    const typeStr = (node.comfyClass || node.type || node.title || "").toString();
-    if (!typeStr.includes("PhotoLabMasterSuite") && 
-        !typeStr.includes("PhotoLab · Master Suite") &&
-        !typeStr.includes("MrWeaz - PhotoLab") &&
-        !typeStr.includes("MrWeazPhotoLab")) return;
+    if (!isPhotoLabMasterNode(node)) return;
+
+    const existingWidget = (node.widgets || []).find(w => w && w.name === "mrweaz_photolab_ui");
+    if (existingWidget && node._photolab_ui_attached) {
+        if (typeof node._syncPhotoLabDOM === "function") {
+            node._syncPhotoLabDOM();
+        }
+        return;
+    }
 
     node._photolab_ui_attached = true;
 
     // Darkroom canvas styling
     node.color = "#151928";
     node.bgcolor = "#0b0e18";
-
 
     // Hide raw LiteGraph canvas widgets so they do not stack vertically
     if (node.widgets && Array.isArray(node.widgets)) {
@@ -112,13 +144,41 @@ function setupPhotoLabMasterUI(node) {
 
         buildDarkroomUI(node, root);
 
-        const domWidget = node.addDOMWidget("mrweaz_photolab_ui", "div", root, { serialize: false });
+        const getWidgetHeight = () => {
+            let nodeH = (node.size && node.size[1]) ? node.size[1] : 760;
+            if (nodeH > 1050) nodeH = 760;
+            return Math.max(500, nodeH - 120);
+        };
+
+        const domWidget = node.addDOMWidget("mrweaz_photolab_ui", "div", root, { 
+            serialize: false,
+            hideOnZoom: false,
+            getHeight: getWidgetHeight,
+            getMinHeight: () => 500,
+        });
+
         if (domWidget) {
-            domWidget.computeSize = () => [0, 0];
+            domWidget.computeSize = function (width) {
+                const w = Math.max(Number(width) || 640, 540);
+                return [w, getWidgetHeight()];
+            };
+            domWidget.computeLayoutSize = function () {
+                const h = getWidgetHeight();
+                return { minHeight: h, maxHeight: h, minWidth: 540 };
+            };
         }
 
-        node.computeSize = function () {
-            return [Math.max(this.size[0] || 640, 540), Math.max(this.size[1] || 740, 600)];
+        node.computeSize = function (out) {
+            const w = Math.max(this.size?.[0] || 640, 540);
+            let h = this.size?.[1] || 760;
+            if (h > 1050) h = 760;
+            h = Math.max(h, 600);
+            if (out) {
+                out[0] = w;
+                out[1] = h;
+                return out;
+            }
+            return [w, h];
         };
 
         node.onResize = function (size) {
@@ -128,9 +188,18 @@ function setupPhotoLabMasterUI(node) {
             this.size[1] = size[1];
         };
 
-        node.size = [640, 740];
+        // Enforce compact, beautifully proportioned node bounds
+        if (!node.size || !Array.isArray(node.size)) {
+            node.size = [640, 760];
+        } else {
+            node.size[0] = Math.max(node.size[0] || 640, 540);
+            if (node.size[1] > 1050 || node.size[1] < 600) {
+                node.size[1] = 760;
+            }
+        }
         node.min_size = [540, 600];
         node.resizable = true;
+        node.setSize?.([node.size[0], node.size[1]]);
 
     } catch (err) {
         console.error("[PhotoLab Master] Error mounting interactive UI:", err);
@@ -806,6 +875,20 @@ function buildDarkroomUI(node, root) {
     // =========================================================================
     const pColor = tabPanels["color"];
 
+    // Card 0A: Auto White Balance (AWB)
+    const bAWB = createFeatureCard(pColor, "Auto White Balance (AWB)", "⚖️", "enable_auto_wb");
+    const awbModeW = node.widgets?.find(w => w && w.name === "auto_wb_mode");
+    const awbModeList = awbModeW?.options?.values || ["Robust Neutral", "Gray World", "White Patch"];
+    createSelect(bAWB, "AWB Estimation Mode", "auto_wb_mode", awbModeList);
+    createSlider(bAWB, "AWB Neutralize Strength", "auto_wb_strength", 0.0, 1.0, 0.05, 0.80);
+
+    // Card 0B: Auto Color & Dynamic Range
+    const bAutoColor = createFeatureCard(pColor, "Auto Color & Dynamic Range", "🎚️", "enable_auto_color");
+    const autoColorModeW = node.widgets?.find(w => w && w.name === "auto_color_mode");
+    const autoColorModeList = autoColorModeW?.options?.values || ["Full Dynamic Balance", "Luma Contrast Only", "Auto Vibrance"];
+    createSelect(bAutoColor, "Auto Color Mode", "auto_color_mode", autoColorModeList);
+    createSlider(bAutoColor, "Correction Strength", "auto_color_strength", 0.0, 1.0, 0.05, 0.75);
+
     // Card A: Studio Relighting
     const bLight = createFeatureCard(pColor, "Studio Exposure Relighting", "💡", "enable_relighting");
     createInlineToggle(bLight, "3D Depth-Aware Relight", "relight_use_depth", true);
@@ -829,7 +912,20 @@ function buildDarkroomUI(node, root) {
     const bStock = createFeatureCard(pColor, "Iconic Film Stock Profiles", "🎞️", "enable_film_stock");
     const stockW = node.widgets?.find(w => w && w.name === "film_stock");
     const stockList = stockW?.options?.values || [
-        "None", "Kodak Portra 400", "Kodak Tri-X 400 (B&W)", "Kodak CineStill 800T", "Fuji Pro 400H", "Kodachrome 64"
+        "None",
+        "Kodak Portra 400",
+        "Kodak Portra 800",
+        "Kodak Gold 200",
+        "Kodak CineStill 800T",
+        "Kodak Vision3 500T",
+        "Kodak Tri-X 400 (B&W)",
+        "Ilford HP5 Plus (B&W)",
+        "Fuji Pro 400H",
+        "Fuji Velvia 50",
+        "Fuji Superia 400",
+        "Kodachrome 64",
+        "Agfa Vista 200",
+        "Polaroid 600"
     ];
     createSelect(bStock, "Film Stock", "film_stock", stockList);
     createSlider(bStock, "Stock Mix", "stock_mix", 0.0, 1.0, 0.05, 0.80);
@@ -1017,7 +1113,8 @@ function buildDarkroomUI(node, root) {
     // Bypass All Button & Baseline Reset logic
     function bypassAll() {
         const allToggles = [
-            "enable_diffusion", "enable_frequency_retouch", "enable_sss", "enable_relighting",
+            "enable_diffusion", "enable_frequency_retouch", "enable_sss",
+            "enable_auto_wb", "enable_auto_color", "enable_relighting",
             "enable_lut", "enable_film_stock", "enable_color_grade", "enable_shoulder",
             "enable_distortion", "enable_dof", "enable_atmosphere",
             "enable_mist", "enable_flare", "enable_halation", "enable_lateral_ca",
@@ -1026,6 +1123,8 @@ function buildDarkroomUI(node, root) {
         allToggles.forEach(t => setToggleState(t, false));
 
         // Reset parameters to baseline defaults so presets do not pollute each other
+        setWidgetValue("auto_wb_strength", 0.80);
+        setWidgetValue("auto_color_strength", 0.75);
         setWidgetValue("contrast", 1.0);
         setWidgetValue("exposure", 0.0);
         setWidgetValue("temperature", 0.0);
@@ -1088,7 +1187,7 @@ function buildDarkroomUI(node, root) {
     masterPresetCard.className = "pl-card active";
     masterPresetCard.innerHTML = `
         <div class="pl-card-title">
-            <span>🎬</span><span>Master Film Looks & Cinematography Presets (22 Curated Looks)</span>
+            <span>🎬</span><span>Master Film Looks & Cinematography Presets (32 Curated Looks)</span>
         </div>
         <div style="font-size: 9.5px; color: var(--pl-text-muted); margin-bottom: 4px;">
             Curated one-click physical optics, 3D volumetric depth, color science, and photochemical film emulations. Click any look to apply.
@@ -1133,86 +1232,97 @@ function buildDarkroomUI(node, root) {
         {
             category: "🎬 Iconic Cinema & Directorial Looks",
             name: "🌌 Blade Runner 2049 (Dystopian Amber)",
-            desc: "Sodium Vapor 3D Key Light + Cool Cyan Fill + Dense Depth Haze + CineStill + Anamorphic",
+            desc: "Sodium Vapor Amber Key + CineStill 800T + Dense Volumetric Dust + Amber Core Halation",
             apply: () => {
                 bypassAll();
                 setToggleState("enable_film_stock", true);
                 setWidgetValue("film_stock", "Kodak CineStill 800T");
                 setWidgetValue("stock_mix", 0.85);
                 setToggleState("enable_color_grade", true);
-                setWidgetValue("temperature", -0.25);
-                setWidgetValue("contrast", 1.25);
-                setWidgetValue("saturation", 0.90);
-                setWidgetValue("exposure", -0.16);
+                setWidgetValue("temperature", 0.18);
+                setWidgetValue("tint", -0.04);
+                setWidgetValue("contrast", 1.22);
+                setWidgetValue("saturation", 1.05);
+                setWidgetValue("exposure", -0.05);
                 setToggleState("enable_relighting", true);
                 setToggleState("relight_use_depth", true);
-                setWidgetValue("light_intensity", 0.70);
-                setWidgetValue("light_x", 0.25);
-                setWidgetValue("light_y", 0.65);
-                setWidgetValue("light_z", 0.15);
-                setWidgetValue("light_radius", 0.75);
-                setWidgetValue("light_color_r", 1.35);
-                setWidgetValue("light_color_g", 0.75);
-                setWidgetValue("light_color_b", 0.25);
+                setWidgetValue("light_intensity", 0.85);
+                setWidgetValue("light_x", 0.35);
+                setWidgetValue("light_y", 0.40);
+                setWidgetValue("light_z", 0.25);
+                setWidgetValue("light_radius", 0.90);
+                setWidgetValue("light_color_r", 1.45);
+                setWidgetValue("light_color_g", 0.78);
+                setWidgetValue("light_color_b", 0.18);
                 setToggleState("enable_atmosphere", true);
                 setToggleState("haze_use_depth", true);
-                setWidgetValue("haze_strength", 0.55);
-                setWidgetValue("lift_blacks", 0.18);
-                setWidgetValue("haze_color_r", 0.12);
-                setWidgetValue("haze_color_g", 0.22);
-                setWidgetValue("haze_color_b", 0.30);
                 setToggleState("light_wrap_use_depth", true);
-                setWidgetValue("light_wrap_strength", 0.45);
-                setToggleState("enable_mist", true);
-                setWidgetValue("mist_intensity", 0.30);
-                setWidgetValue("mist_radius", 32);
+                setWidgetValue("haze_strength", 0.45);
+                setWidgetValue("lift_blacks", 0.08);
+                setWidgetValue("depth_offset", 0.05);
+                setWidgetValue("haze_color_r", 0.22);
+                setWidgetValue("haze_color_g", 0.14);
+                setWidgetValue("haze_color_b", 0.06);
+                setWidgetValue("light_wrap_strength", 0.38);
+                setToggleState("enable_halation", true);
+                setWidgetValue("halation_intensity", 0.50);
+                setWidgetValue("halation_spread", 28);
+                setWidgetValue("halation_threshold", 0.72);
+                setWidgetValue("halation_amber_core", 0.85);
                 setToggleState("enable_flare", true);
-                setWidgetValue("anamorphic_flare", 0.45);
+                setWidgetValue("anamorphic_flare", 0.35);
                 setToggleState("enable_vignette", true);
-                setWidgetValue("vignette_amount", 0.35);
+                setWidgetValue("vignette_amount", 0.32);
+                setToggleState("enable_grain", true);
+                setWidgetValue("grain_amount", 0.22);
+                setWidgetValue("grain_size", 1.4);
+                setWidgetValue("grain_color", 0.15);
             }
         },
         {
             category: "🎬 Iconic Cinema & Directorial Looks",
             name: "🏜️ Dune Arrakis Spice (Villeneuve / Fraser)",
-            desc: "Bleached Sun Exposure + Ochre Dust Volumetric Haze + Warm Sand Relight + 65mm IMAX Scale",
+            desc: "Bleached Sun Exposure + Ochre Dust Volumetric Haze + Warm Sand Relight + 65mm Scale",
             apply: () => {
                 bypassAll();
                 setToggleState("enable_film_stock", true);
-                setWidgetValue("film_stock", "Kodak Portra 400");
-                setWidgetValue("stock_mix", 0.70);
+                setWidgetValue("film_stock", "Kodak Vision3 500T");
+                setWidgetValue("stock_mix", 0.75);
                 setToggleState("enable_color_grade", true);
-                setWidgetValue("temperature", 0.38);
-                setWidgetValue("tint", -0.10);
-                setWidgetValue("contrast", 1.18);
+                setWidgetValue("exposure", 0.18);
+                setWidgetValue("contrast", 1.16);
                 setWidgetValue("saturation", 0.85);
-                setWidgetValue("exposure", 0.12);
+                setWidgetValue("temperature", 0.20);
+                setWidgetValue("tint", -0.06);
+                setToggleState("enable_shoulder", true);
+                setWidgetValue("shoulder_start", 0.62);
+                setWidgetValue("rolloff_softness", 1.05);
+                setWidgetValue("highlight_desat", 0.75);
                 setToggleState("enable_relighting", true);
                 setToggleState("relight_use_depth", true);
-                setWidgetValue("light_intensity", 0.45);
-                setWidgetValue("light_x", 0.80);
+                setWidgetValue("light_intensity", 0.55);
+                setWidgetValue("light_x", 0.70);
                 setWidgetValue("light_y", 0.20);
-                setWidgetValue("light_z", 0.25);
-                setWidgetValue("light_radius", 0.90);
-                setWidgetValue("light_color_r", 1.30);
-                setWidgetValue("light_color_g", 0.90);
-                setWidgetValue("light_color_b", 0.50);
+                setWidgetValue("light_z", 0.15);
+                setWidgetValue("light_radius", 1.20);
+                setWidgetValue("light_color_r", 1.25);
+                setWidgetValue("light_color_g", 1.05);
+                setWidgetValue("light_color_b", 0.75);
                 setToggleState("enable_atmosphere", true);
                 setToggleState("haze_use_depth", true);
-                setWidgetValue("haze_strength", 0.60);
-                setWidgetValue("lift_blacks", 0.16);
-                setWidgetValue("haze_color_r", 0.28);
-                setWidgetValue("haze_color_g", 0.20);
-                setWidgetValue("haze_color_b", 0.10);
                 setToggleState("light_wrap_use_depth", true);
-                setWidgetValue("light_wrap_strength", 0.55);
-                setToggleState("enable_shoulder", true);
-                setWidgetValue("shoulder_start", 0.64);
-                setWidgetValue("rolloff_softness", 0.95);
-                setWidgetValue("highlight_desat", 0.75);
+                setWidgetValue("haze_strength", 0.55);
+                setWidgetValue("lift_blacks", 0.14);
+                setWidgetValue("depth_offset", 0.10);
+                setWidgetValue("haze_color_r", 0.28);
+                setWidgetValue("haze_color_g", 0.22);
+                setWidgetValue("haze_color_b", 0.12);
+                setWidgetValue("light_wrap_strength", 0.42);
+                setToggleState("enable_vignette", true);
+                setWidgetValue("vignette_amount", 0.38);
                 setToggleState("enable_grain", true);
-                setWidgetValue("grain_amount", 0.16);
-                setWidgetValue("grain_size", 1.2);
+                setWidgetValue("grain_amount", 0.15);
+                setWidgetValue("grain_size", 1.1);
             }
         },
         {
@@ -1221,21 +1331,39 @@ function buildDarkroomUI(node, root) {
             desc: "Cold Analytic Balance + Clinical High-Key Exposure + Razor Contrast + Clean Low Grain",
             apply: () => {
                 bypassAll();
+                setToggleState("enable_film_stock", true);
+                setWidgetValue("film_stock", "Kodak Vision3 500T");
+                setWidgetValue("stock_mix", 0.40);
                 setToggleState("enable_color_grade", true);
-                setWidgetValue("temperature", -0.18);
-                setWidgetValue("tint", -0.02);
+                setWidgetValue("exposure", 0.15);
                 setWidgetValue("contrast", 1.28);
-                setWidgetValue("saturation", 0.90);
-                setWidgetValue("exposure", 0.12);
+                setWidgetValue("saturation", 0.80);
+                setWidgetValue("temperature", -0.16);
+                setWidgetValue("tint", 0.04);
+                setToggleState("enable_frequency_retouch", true);
+                setWidgetValue("clarity", 0.35);
                 setToggleState("enable_shoulder", true);
                 setWidgetValue("shoulder_start", 0.78);
-                setWidgetValue("rolloff_softness", 0.65);
+                setWidgetValue("rolloff_softness", 0.60);
                 setWidgetValue("highlight_desat", 0.85);
-                setToggleState("enable_vignette", true);
-                setWidgetValue("vignette_amount", 0.15);
+                setToggleState("enable_relighting", true);
+                setWidgetValue("light_intensity", 0.60);
+                setWidgetValue("light_x", 0.50);
+                setWidgetValue("light_y", 0.10);
+                setWidgetValue("light_z", 0.10);
+                setWidgetValue("light_radius", 1.40);
+                setWidgetValue("light_color_r", 0.95);
+                setWidgetValue("light_color_g", 1.02);
+                setWidgetValue("light_color_b", 1.15);
+                setToggleState("enable_atmosphere", true);
+                setWidgetValue("haze_strength", 0.15);
+                setWidgetValue("lift_blacks", 0.02);
+                setWidgetValue("haze_color_r", 0.10);
+                setWidgetValue("haze_color_g", 0.14);
+                setWidgetValue("haze_color_b", 0.20);
                 setToggleState("enable_grain", true);
-                setWidgetValue("grain_amount", 0.06);
-                setWidgetValue("grain_size", 0.9);
+                setWidgetValue("grain_amount", 0.08);
+                setWidgetValue("grain_size", 1.0);
             }
         },
         {
@@ -1244,31 +1372,32 @@ function buildDarkroomUI(node, root) {
             desc: "Moody Fluorescent Olive Grade + Crushed Inky Blacks + Piercing Texture Clarity + Vignette",
             apply: () => {
                 bypassAll();
+                setToggleState("enable_film_stock", true);
+                setWidgetValue("film_stock", "Fuji Superia 400");
+                setWidgetValue("stock_mix", 0.70);
                 setToggleState("enable_color_grade", true);
-                setWidgetValue("temperature", -0.08);
-                setWidgetValue("tint", -0.18);
-                setWidgetValue("contrast", 1.34);
+                setWidgetValue("exposure", -0.15);
+                setWidgetValue("contrast", 1.30);
                 setWidgetValue("saturation", 0.82);
-                setWidgetValue("exposure", -0.14);
-                setToggleState("enable_relighting", true);
-                setToggleState("relight_use_depth", true);
-                setWidgetValue("light_intensity", 0.45);
-                setWidgetValue("light_x", 0.35);
-                setWidgetValue("light_y", 0.45);
-                setWidgetValue("light_z", 0.15);
-                setWidgetValue("light_radius", 0.60);
-                setWidgetValue("light_color_r", 0.85);
-                setWidgetValue("light_color_g", 1.05);
-                setWidgetValue("light_color_b", 0.75);
+                setWidgetValue("temperature", -0.08);
+                setWidgetValue("tint", 0.22);
                 setToggleState("enable_frequency_retouch", true);
                 setWidgetValue("clarity", 0.30);
+                setWidgetValue("skin_smooth", 0.25);
                 setToggleState("enable_shoulder", true);
-                setWidgetValue("shoulder_start", 0.66);
-                setWidgetValue("rolloff_softness", 0.75);
+                setWidgetValue("shoulder_start", 0.75);
+                setWidgetValue("rolloff_softness", 0.70);
+                setWidgetValue("highlight_desat", 0.50);
+                setToggleState("enable_atmosphere", true);
+                setWidgetValue("haze_strength", 0.20);
+                setWidgetValue("lift_blacks", 0.04);
+                setWidgetValue("haze_color_r", 0.08);
+                setWidgetValue("haze_color_g", 0.14);
+                setWidgetValue("haze_color_b", 0.09);
                 setToggleState("enable_vignette", true);
                 setWidgetValue("vignette_amount", 0.42);
                 setToggleState("enable_grain", true);
-                setWidgetValue("grain_amount", 0.18);
+                setWidgetValue("grain_amount", 0.24);
                 setWidgetValue("grain_size", 1.3);
             }
         },
@@ -1278,33 +1407,40 @@ function buildDarkroomUI(node, root) {
             desc: "Saturated Crimson Gel 3D Relighting + Deep Noir Shadows + Intense Halation + Black Pro-Mist",
             apply: () => {
                 bypassAll();
+                setToggleState("enable_film_stock", true);
+                setWidgetValue("film_stock", "Kodak Gold 200");
+                setWidgetValue("stock_mix", 0.80);
                 setToggleState("enable_color_grade", true);
-                setWidgetValue("saturation", 1.38);
-                setWidgetValue("contrast", 1.30);
-                setWidgetValue("exposure", -0.08);
+                setWidgetValue("exposure", 0.05);
+                setWidgetValue("contrast", 1.35);
+                setWidgetValue("saturation", 1.30);
                 setWidgetValue("temperature", 0.12);
+                setWidgetValue("tint", -0.10);
                 setToggleState("enable_relighting", true);
                 setToggleState("relight_use_depth", true);
-                setWidgetValue("light_intensity", 0.75);
-                setWidgetValue("light_x", 0.80);
-                setWidgetValue("light_y", 0.40);
-                setWidgetValue("light_z", 0.12);
-                setWidgetValue("light_radius", 0.70);
-                setWidgetValue("light_color_r", 1.45);
-                setWidgetValue("light_color_g", 0.20);
+                setWidgetValue("light_intensity", 1.10);
+                setWidgetValue("light_x", 0.20);
+                setWidgetValue("light_y", 0.35);
+                setWidgetValue("light_z", 0.18);
+                setWidgetValue("light_radius", 0.75);
+                setWidgetValue("light_color_r", 1.80);
+                setWidgetValue("light_color_g", 0.15);
                 setWidgetValue("light_color_b", 0.25);
-                setToggleState("enable_halation", true);
-                setWidgetValue("halation_intensity", 0.55);
-                setWidgetValue("halation_spread", 30);
-                setWidgetValue("halation_amber_core", 0.70);
                 setToggleState("enable_mist", true);
-                setWidgetValue("mist_intensity", 0.35);
-                setWidgetValue("mist_radius", 34);
+                setWidgetValue("mist_type", "Black Pro-Mist");
+                setWidgetValue("mist_intensity", 0.45);
+                setWidgetValue("mist_radius", 38);
+                setWidgetValue("mist_cutoff", 0.55);
+                setToggleState("enable_halation", true);
+                setWidgetValue("halation_intensity", 0.60);
+                setWidgetValue("halation_spread", 32);
+                setWidgetValue("halation_threshold", 0.65);
+                setWidgetValue("halation_amber_core", 0.20);
                 setToggleState("enable_vignette", true);
-                setWidgetValue("vignette_amount", 0.48);
+                setWidgetValue("vignette_amount", 0.45);
                 setToggleState("enable_grain", true);
-                setWidgetValue("grain_amount", 0.32);
-                setWidgetValue("grain_size", 1.8);
+                setWidgetValue("grain_amount", 0.28);
+                setWidgetValue("grain_size", 1.6);
             }
         },
         {
@@ -1313,24 +1449,72 @@ function buildDarkroomUI(node, root) {
             desc: "Vibrant Custard Yellow & Mint Palette + Flat Low Contrast + Soft Fog Diffusion + Crisp Geometry",
             apply: () => {
                 bypassAll();
+                setToggleState("enable_film_stock", true);
+                setWidgetValue("film_stock", "Agfa Vista 200");
+                setWidgetValue("stock_mix", 0.85);
                 setToggleState("enable_color_grade", true);
-                setWidgetValue("temperature", 0.22);
-                setWidgetValue("tint", 0.10);
-                setWidgetValue("contrast", 0.92);
-                setWidgetValue("saturation", 1.35);
                 setWidgetValue("exposure", 0.20);
+                setWidgetValue("contrast", 0.88);
+                setWidgetValue("saturation", 1.18);
+                setWidgetValue("temperature", 0.18);
+                setWidgetValue("tint", -0.12);
                 setToggleState("enable_mist", true);
                 setWidgetValue("mist_type", "White Diffusion / Fog");
-                setWidgetValue("mist_intensity", 0.26);
+                setWidgetValue("mist_intensity", 0.30);
                 setWidgetValue("mist_radius", 32);
+                setWidgetValue("mist_cutoff", 0.50);
                 setToggleState("enable_shoulder", true);
-                setWidgetValue("shoulder_start", 0.70);
-                setWidgetValue("rolloff_softness", 1.15);
-                setToggleState("enable_vignette", true);
-                setWidgetValue("vignette_amount", 0.20);
+                setWidgetValue("shoulder_start", 0.60);
+                setWidgetValue("rolloff_softness", 1.25);
+                setWidgetValue("highlight_desat", 0.20);
                 setToggleState("enable_grain", true);
-                setWidgetValue("grain_amount", 0.12);
-                setWidgetValue("grain_size", 1.1);
+                setWidgetValue("grain_amount", 0.16);
+                setWidgetValue("grain_size", 1.2);
+            }
+        },
+        {
+            category: "🎬 Iconic Cinema & Directorial Looks",
+            name: "🌃 Michael Mann Heat (1995 Los Angeles)",
+            desc: "Cool Blue-Steel Nocturnal Grade + Sodium Streetlight Relighting + CineStill + Anamorphic Flare",
+            apply: () => {
+                bypassAll();
+                setToggleState("enable_film_stock", true);
+                setWidgetValue("film_stock", "Kodak CineStill 800T");
+                setWidgetValue("stock_mix", 0.75);
+                setToggleState("enable_color_grade", true);
+                setWidgetValue("exposure", -0.10);
+                setWidgetValue("contrast", 1.26);
+                setWidgetValue("saturation", 0.88);
+                setWidgetValue("temperature", -0.18);
+                setWidgetValue("tint", 0.05);
+                setToggleState("enable_relighting", true);
+                setToggleState("relight_use_depth", true);
+                setWidgetValue("light_intensity", 0.75);
+                setWidgetValue("light_x", 0.80);
+                setWidgetValue("light_y", 0.30);
+                setWidgetValue("light_z", 0.20);
+                setWidgetValue("light_radius", 0.70);
+                setWidgetValue("light_color_r", 1.35);
+                setWidgetValue("light_color_g", 0.82);
+                setWidgetValue("light_color_b", 0.28);
+                setToggleState("enable_atmosphere", true);
+                setToggleState("haze_use_depth", true);
+                setToggleState("light_wrap_use_depth", true);
+                setWidgetValue("haze_strength", 0.35);
+                setWidgetValue("lift_blacks", 0.05);
+                setWidgetValue("haze_color_r", 0.08);
+                setWidgetValue("haze_color_g", 0.12);
+                setWidgetValue("haze_color_b", 0.24);
+                setWidgetValue("light_wrap_strength", 0.35);
+                setToggleState("enable_flare", true);
+                setWidgetValue("anamorphic_flare", 0.45);
+                setToggleState("enable_lateral_ca", true);
+                setWidgetValue("lateral_ca", 0.005);
+                setToggleState("enable_vignette", true);
+                setWidgetValue("vignette_amount", 0.36);
+                setToggleState("enable_grain", true);
+                setWidgetValue("grain_amount", 0.25);
+                setWidgetValue("grain_size", 1.5);
             }
         },
 
@@ -1345,54 +1529,57 @@ function buildDarkroomUI(node, root) {
                 bypassAll();
                 setToggleState("enable_film_stock", true);
                 setWidgetValue("film_stock", "Kodak CineStill 800T");
-                setWidgetValue("stock_mix", 1.0);
+                setWidgetValue("stock_mix", 0.95);
                 setToggleState("enable_color_grade", true);
-                setWidgetValue("temperature", -0.22);
-                setWidgetValue("tint", 0.12);
                 setWidgetValue("contrast", 1.25);
-                setWidgetValue("saturation", 1.30);
-                setWidgetValue("exposure", -0.10);
+                setWidgetValue("exposure", 0.05);
+                setWidgetValue("temperature", -0.10);
+                setWidgetValue("tint", 0.18);
+                setWidgetValue("saturation", 1.25);
                 setToggleState("enable_halation", true);
-                setWidgetValue("halation_intensity", 0.50);
-                setWidgetValue("halation_spread", 32);
-                setWidgetValue("halation_amber_core", 0.65);
+                setWidgetValue("halation_intensity", 0.55);
+                setWidgetValue("halation_spread", 26);
+                setWidgetValue("halation_threshold", 0.70);
+                setWidgetValue("halation_amber_core", 0.75);
                 setToggleState("enable_flare", true);
-                setWidgetValue("anamorphic_flare", 0.60);
+                setWidgetValue("anamorphic_flare", 0.45);
                 setToggleState("enable_mist", true);
-                setWidgetValue("mist_intensity", 0.40);
-                setWidgetValue("mist_radius", 38);
+                setWidgetValue("mist_type", "Black Pro-Mist");
+                setWidgetValue("mist_intensity", 0.35);
+                setWidgetValue("mist_radius", 32);
+                setWidgetValue("mist_cutoff", 0.55);
                 setToggleState("enable_vignette", true);
                 setWidgetValue("vignette_amount", 0.30);
                 setToggleState("enable_grain", true);
-                setWidgetValue("grain_amount", 0.28);
-                setWidgetValue("grain_size", 1.6);
+                setWidgetValue("grain_amount", 0.22);
+                setWidgetValue("grain_size", 1.4);
             }
         },
         {
             category: "📸 Photochemical Film Stocks & Vintage",
             name: "🎥 16mm French New Wave",
-            desc: "Fuji 400H + 35mm Prime Distortion + Chromatic Aberration + Gritty 16mm Silver Grain",
+            desc: "Fuji Pro 400H + 35mm Prime Distortion + Chromatic Aberration + Gritty 16mm Silver Grain",
             apply: () => {
                 bypassAll();
                 setToggleState("enable_film_stock", true);
                 setWidgetValue("film_stock", "Fuji Pro 400H");
                 setWidgetValue("stock_mix", 0.90);
-                setToggleState("enable_distortion", true);
-                setWidgetValue("lens_distortion", -0.025);
-                setToggleState("enable_lateral_ca", true);
-                setWidgetValue("lateral_ca", 0.006);
                 setToggleState("enable_color_grade", true);
                 setWidgetValue("contrast", 1.15);
+                setWidgetValue("exposure", 0.08);
+                setWidgetValue("temperature", 0.05);
                 setWidgetValue("saturation", 0.95);
-                setWidgetValue("temperature", -0.05);
-                setToggleState("enable_shoulder", true);
-                setWidgetValue("shoulder_start", 0.70);
-                setWidgetValue("rolloff_softness", 0.85);
+                setToggleState("enable_distortion", true);
+                setWidgetValue("lens_distortion", -0.035);
+                setToggleState("enable_lateral_ca", true);
+                setWidgetValue("lateral_ca", 0.007);
                 setToggleState("enable_vignette", true);
-                setWidgetValue("vignette_amount", 0.38);
+                setWidgetValue("vignette_amount", 0.35);
                 setToggleState("enable_grain", true);
-                setWidgetValue("grain_amount", 0.42);
+                setWidgetValue("grain_amount", 0.40);
                 setWidgetValue("grain_size", 2.2);
+                setWidgetValue("grain_shadows", 0.60);
+                setWidgetValue("grain_midtones", 1.10);
             }
         },
         {
@@ -1403,20 +1590,76 @@ function buildDarkroomUI(node, root) {
                 bypassAll();
                 setToggleState("enable_film_stock", true);
                 setWidgetValue("film_stock", "Kodachrome 64");
-                setWidgetValue("stock_mix", 1.0);
+                setWidgetValue("stock_mix", 0.95);
                 setToggleState("enable_color_grade", true);
-                setWidgetValue("temperature", 0.16);
-                setWidgetValue("tint", -0.04);
-                setWidgetValue("contrast", 1.22);
-                setWidgetValue("saturation", 1.20);
-                setWidgetValue("exposure", 0.02);
-                setToggleState("enable_distortion", true);
-                setWidgetValue("lens_distortion", -0.015);
+                setWidgetValue("contrast", 1.20);
+                setWidgetValue("exposure", 0.04);
+                setWidgetValue("temperature", 0.14);
+                setWidgetValue("saturation", 1.15);
                 setToggleState("enable_shoulder", true);
-                setWidgetValue("shoulder_start", 0.68);
-                setWidgetValue("rolloff_softness", 0.80);
+                setWidgetValue("shoulder_start", 0.65);
+                setWidgetValue("rolloff_softness", 0.90);
+                setWidgetValue("highlight_desat", 0.45);
                 setToggleState("enable_vignette", true);
-                setWidgetValue("vignette_amount", 0.40);
+                setWidgetValue("vignette_amount", 0.35);
+                setToggleState("enable_grain", true);
+                setWidgetValue("grain_amount", 0.24);
+                setWidgetValue("grain_size", 1.3);
+            }
+        },
+        {
+            category: "📸 Photochemical Film Stocks & Vintage",
+            name: "🍭 Technicolor Three-Strip (1950s)",
+            desc: "Vibrant Dye-Transfer Saturation + Golden Glow Halation + Soft Shoulder + 35mm Grain",
+            apply: () => {
+                bypassAll();
+                setToggleState("enable_film_stock", true);
+                setWidgetValue("film_stock", "Kodak Gold 200");
+                setWidgetValue("stock_mix", 0.90);
+                setToggleState("enable_color_grade", true);
+                setWidgetValue("contrast", 1.22);
+                setWidgetValue("exposure", 0.10);
+                setWidgetValue("saturation", 1.40);
+                setWidgetValue("temperature", 0.08);
+                setWidgetValue("tint", -0.06);
+                setToggleState("enable_shoulder", true);
+                setWidgetValue("shoulder_start", 0.62);
+                setWidgetValue("rolloff_softness", 1.10);
+                setWidgetValue("highlight_desat", 0.25);
+                setToggleState("enable_halation", true);
+                setWidgetValue("halation_intensity", 0.38);
+                setWidgetValue("halation_spread", 22);
+                setWidgetValue("halation_amber_core", 0.60);
+                setToggleState("enable_vignette", true);
+                setWidgetValue("vignette_amount", 0.25);
+                setToggleState("enable_grain", true);
+                setWidgetValue("grain_amount", 0.18);
+                setWidgetValue("grain_size", 1.3);
+            }
+        },
+        {
+            category: "📸 Photochemical Film Stocks & Vintage",
+            name: "☕ 90s Seattle Grunge & Coffeehouse",
+            desc: "Kodak Portra 800 + Earthy Olive/Ochre Tones + Lifted Toe + Intimate 35mm Grain",
+            apply: () => {
+                bypassAll();
+                setToggleState("enable_film_stock", true);
+                setWidgetValue("film_stock", "Kodak Portra 800");
+                setWidgetValue("stock_mix", 0.90);
+                setToggleState("enable_color_grade", true);
+                setWidgetValue("contrast", 1.08);
+                setWidgetValue("exposure", -0.05);
+                setWidgetValue("temperature", 0.12);
+                setWidgetValue("tint", 0.08);
+                setWidgetValue("saturation", 0.88);
+                setToggleState("enable_atmosphere", true);
+                setWidgetValue("lift_blacks", 0.12);
+                setWidgetValue("haze_strength", 0.25);
+                setWidgetValue("haze_color_r", 0.20);
+                setWidgetValue("haze_color_g", 0.17);
+                setWidgetValue("haze_color_b", 0.12);
+                setToggleState("enable_vignette", true);
+                setWidgetValue("vignette_amount", 0.32);
                 setToggleState("enable_grain", true);
                 setWidgetValue("grain_amount", 0.32);
                 setWidgetValue("grain_size", 1.7);
@@ -1424,56 +1667,65 @@ function buildDarkroomUI(node, root) {
         },
         {
             category: "📸 Photochemical Film Stocks & Vintage",
-            name: "🍭 Technicolor Three-Strip (1950s)",
-            desc: "Vibrant Dye-Transfer Saturation + Rich Golden Glow Halation + Soft Shoulder + 35mm Grain",
+            name: "🎞️ Polaroid 600 Instant",
+            desc: "Polaroid 600 Stock + Milky Lifted Blacks + Warm Faded Chromatics + Soft Edge Fog",
             apply: () => {
                 bypassAll();
+                setToggleState("enable_film_stock", true);
+                setWidgetValue("film_stock", "Polaroid 600");
+                setWidgetValue("stock_mix", 0.95);
                 setToggleState("enable_color_grade", true);
-                setWidgetValue("saturation", 1.45);
-                setWidgetValue("contrast", 1.28);
-                setWidgetValue("exposure", 0.06);
-                setWidgetValue("temperature", 0.05);
-                setToggleState("enable_shoulder", true);
-                setWidgetValue("shoulder_start", 0.70);
-                setWidgetValue("rolloff_softness", 0.75);
-                setWidgetValue("highlight_desat", 0.40);
-                setToggleState("enable_halation", true);
-                setWidgetValue("halation_intensity", 0.38);
-                setWidgetValue("halation_spread", 26);
-                setWidgetValue("halation_amber_core", 0.55);
+                setWidgetValue("contrast", 1.14);
+                setWidgetValue("exposure", 0.08);
+                setWidgetValue("temperature", 0.10);
+                setWidgetValue("tint", -0.04);
+                setWidgetValue("saturation", 0.92);
+                setToggleState("enable_atmosphere", true);
+                setWidgetValue("lift_blacks", 0.18);
+                setWidgetValue("haze_strength", 0.28);
+                setWidgetValue("haze_color_r", 0.24);
+                setWidgetValue("haze_color_g", 0.22);
+                setWidgetValue("haze_color_b", 0.20);
+                setToggleState("enable_mist", true);
+                setWidgetValue("mist_type", "White Diffusion / Fog");
+                setWidgetValue("mist_intensity", 0.28);
+                setWidgetValue("mist_radius", 36);
+                setWidgetValue("mist_cutoff", 0.55);
+                setToggleState("enable_lateral_ca", true);
+                setWidgetValue("lateral_ca", 0.005);
                 setToggleState("enable_vignette", true);
-                setWidgetValue("vignette_amount", 0.28);
+                setWidgetValue("vignette_amount", 0.38);
                 setToggleState("enable_grain", true);
-                setWidgetValue("grain_amount", 0.22);
-                setWidgetValue("grain_size", 1.5);
+                setWidgetValue("grain_amount", 0.30);
+                setWidgetValue("grain_size", 1.8);
             }
         },
         {
             category: "📸 Photochemical Film Stocks & Vintage",
-            name: "☕ 90s Seattle Grunge & Coffeehouse",
-            desc: "Warm Earthy Olive/Ochre Tones + Lifted Dynamic Toe + Portra Warmth + Intimate 35mm Grain",
+            name: "🌅 Fuji Velvia 50 Landscape",
+            desc: "Fuji Velvia 50 + Hyper-Saturated Emerald Greens & Vivid Skies + Rich Punchy Contrast",
             apply: () => {
                 bypassAll();
                 setToggleState("enable_film_stock", true);
-                setWidgetValue("film_stock", "Kodak Portra 400");
-                setWidgetValue("stock_mix", 0.85);
+                setWidgetValue("film_stock", "Fuji Velvia 50");
+                setWidgetValue("stock_mix", 0.95);
                 setToggleState("enable_color_grade", true);
-                setWidgetValue("temperature", 0.18);
-                setWidgetValue("tint", -0.08);
-                setWidgetValue("contrast", 1.10);
-                setWidgetValue("saturation", 0.92);
-                setWidgetValue("exposure", -0.05);
-                setToggleState("enable_mist", true);
-                setWidgetValue("mist_intensity", 0.22);
-                setWidgetValue("mist_radius", 26);
+                setWidgetValue("contrast", 1.25);
+                setWidgetValue("exposure", 0.02);
+                setWidgetValue("temperature", 0.02);
+                setWidgetValue("tint", -0.05);
+                setWidgetValue("saturation", 1.35);
+                setToggleState("enable_frequency_retouch", true);
+                setWidgetValue("clarity", 0.25);
                 setToggleState("enable_shoulder", true);
-                setWidgetValue("shoulder_start", 0.65);
-                setWidgetValue("rolloff_softness", 0.85);
+                setWidgetValue("shoulder_start", 0.72);
+                setWidgetValue("rolloff_softness", 0.75);
+                setWidgetValue("highlight_desat", 0.30);
                 setToggleState("enable_vignette", true);
-                setWidgetValue("vignette_amount", 0.35);
+                setWidgetValue("vignette_amount", 0.22);
                 setToggleState("enable_grain", true);
-                setWidgetValue("grain_amount", 0.34);
-                setWidgetValue("grain_size", 1.8);
+                setWidgetValue("grain_amount", 0.10);
+                setWidgetValue("grain_size", 1.0);
             }
         },
 
@@ -1483,13 +1735,16 @@ function buildDarkroomUI(node, root) {
         {
             category: "💄 Portrait, Studio & High-End Editorial",
             name: "💄 Vogue High-Fashion Editorial",
-            desc: "Pore-Locking Retouch + SSS Red Bleed + 3D Key/Rim Light + Soft Shoulder Rolloff + Crisp Grain",
+            desc: "Pore-Locking Retouch + SSS Red Bleed + 3D Key/Rim Light + Soft Shoulder Rolloff",
             apply: () => {
                 bypassAll();
+                setToggleState("enable_film_stock", true);
+                setWidgetValue("film_stock", "Kodak Portra 400");
+                setWidgetValue("stock_mix", 0.80);
                 setToggleState("enable_frequency_retouch", true);
-                setWidgetValue("skin_smooth", 0.48);
-                setWidgetValue("smooth_radius", 7);
-                setWidgetValue("clarity", 0.22);
+                setWidgetValue("skin_smooth", 0.45);
+                setWidgetValue("smooth_radius", 9);
+                setWidgetValue("clarity", 0.18);
                 setToggleState("enable_sss", true);
                 setWidgetValue("sss_amount", 0.32);
                 setWidgetValue("sss_radius", 16);
@@ -1498,67 +1753,67 @@ function buildDarkroomUI(node, root) {
                 setWidgetValue("sss_tint_b", 0.08);
                 setToggleState("enable_relighting", true);
                 setToggleState("relight_use_depth", true);
-                setWidgetValue("light_intensity", 0.42);
-                setWidgetValue("light_x", 0.72);
-                setWidgetValue("light_y", 0.32);
+                setWidgetValue("light_intensity", 0.40);
+                setWidgetValue("light_x", 0.40);
+                setWidgetValue("light_y", 0.35);
                 setWidgetValue("light_z", 0.18);
-                setWidgetValue("light_radius", 0.80);
+                setWidgetValue("light_radius", 0.70);
                 setWidgetValue("light_color_r", 1.05);
                 setWidgetValue("light_color_g", 0.98);
                 setWidgetValue("light_color_b", 0.92);
                 setToggleState("enable_shoulder", true);
-                setWidgetValue("shoulder_start", 0.74);
+                setWidgetValue("shoulder_start", 0.68);
                 setWidgetValue("rolloff_softness", 0.90);
                 setWidgetValue("highlight_desat", 0.65);
-                setToggleState("enable_mist", true);
-                setWidgetValue("mist_intensity", 0.18);
-                setWidgetValue("mist_radius", 20);
                 setToggleState("enable_grain", true);
-                setWidgetValue("grain_amount", 0.08);
-                setWidgetValue("grain_size", 1.0);
+                setWidgetValue("grain_amount", 0.16);
+                setWidgetValue("grain_size", 1.2);
             }
         },
         {
             category: "💄 Portrait, Studio & High-End Editorial",
             name: "🌅 Golden Hour Nat-Geo",
-            desc: "Warm Sun Rim Light + Atmospheric Depth Rayleigh Haze + Light Wrap + f/2.0 Disc Bokeh",
+            desc: "Kodak Gold 200 + Warm Sun Rim Light + Atmospheric Rayleigh Haze + Light Wrap + f/2.0 Bokeh",
             apply: () => {
                 bypassAll();
                 setToggleState("enable_film_stock", true);
-                setWidgetValue("film_stock", "Kodak Portra 400");
-                setWidgetValue("stock_mix", 0.80);
+                setWidgetValue("film_stock", "Kodak Gold 200");
+                setWidgetValue("stock_mix", 0.85);
                 setToggleState("enable_color_grade", true);
-                setWidgetValue("temperature", 0.32);
-                setWidgetValue("tint", -0.06);
-                setWidgetValue("saturation", 1.15);
-                setWidgetValue("exposure", 0.18);
-                setWidgetValue("contrast", 1.08);
+                setWidgetValue("contrast", 1.10);
+                setWidgetValue("exposure", 0.06);
+                setWidgetValue("temperature", 0.22);
+                setWidgetValue("tint", -0.08);
+                setWidgetValue("saturation", 1.12);
                 setToggleState("enable_relighting", true);
                 setToggleState("relight_use_depth", true);
-                setWidgetValue("light_intensity", 0.55);
+                setWidgetValue("light_intensity", 0.65);
                 setWidgetValue("light_x", 0.85);
-                setWidgetValue("light_y", 0.18);
-                setWidgetValue("light_z", 0.25);
-                setWidgetValue("light_radius", 0.70);
-                setWidgetValue("light_color_r", 1.30);
-                setWidgetValue("light_color_g", 0.92);
-                setWidgetValue("light_color_b", 0.55);
+                setWidgetValue("light_y", 0.20);
+                setWidgetValue("light_z", 0.22);
+                setWidgetValue("light_radius", 0.95);
+                setWidgetValue("light_color_r", 1.40);
+                setWidgetValue("light_color_g", 0.95);
+                setWidgetValue("light_color_b", 0.45);
                 setToggleState("enable_atmosphere", true);
                 setToggleState("haze_use_depth", true);
-                setWidgetValue("haze_strength", 0.38);
-                setWidgetValue("lift_blacks", 0.12);
-                setWidgetValue("haze_color_r", 0.24);
-                setWidgetValue("haze_color_g", 0.18);
-                setWidgetValue("haze_color_b", 0.12);
                 setToggleState("light_wrap_use_depth", true);
-                setWidgetValue("light_wrap_strength", 0.50);
+                setWidgetValue("haze_strength", 0.40);
+                setWidgetValue("lift_blacks", 0.06);
+                setWidgetValue("haze_color_r", 0.26);
+                setWidgetValue("haze_color_g", 0.18);
+                setWidgetValue("haze_color_b", 0.10);
+                setWidgetValue("light_wrap_strength", 0.45);
                 setToggleState("enable_dof", true);
-                setToggleState("dof_use_depth", true);
                 setWidgetValue("f_stop", "f/2.0");
-                setWidgetValue("dof_intensity", 0.32);
-                setToggleState("enable_shoulder", true);
-                setWidgetValue("shoulder_start", 0.68);
-                setWidgetValue("rolloff_softness", 0.85);
+                setWidgetValue("dof_intensity", 0.35);
+                setToggleState("enable_halation", true);
+                setWidgetValue("halation_intensity", 0.35);
+                setWidgetValue("halation_spread", 24);
+                setWidgetValue("halation_amber_core", 0.75);
+                setToggleState("enable_grain", true);
+                setWidgetValue("grain_amount", 0.18);
+                setWidgetValue("grain_size", 1.3);
             }
         },
         {
@@ -1569,69 +1824,155 @@ function buildDarkroomUI(node, root) {
                 bypassAll();
                 setToggleState("enable_film_stock", true);
                 setWidgetValue("film_stock", "Kodak Portra 400");
-                setWidgetValue("stock_mix", 0.90);
+                setWidgetValue("stock_mix", 0.85);
                 setToggleState("enable_color_grade", true);
-                setWidgetValue("contrast", 1.10);
-                setWidgetValue("exposure", 0.05);
-                setWidgetValue("temperature", 0.05);
-                setWidgetValue("saturation", 1.02);
-                setToggleState("enable_shoulder", true);
-                setWidgetValue("shoulder_start", 0.72);
-                setWidgetValue("rolloff_softness", 0.85);
-                setWidgetValue("highlight_desat", 0.60);
-                setToggleState("enable_dof", true);
-                setToggleState("dof_use_depth", true);
-                setWidgetValue("f_stop", "f/1.8");
-                setWidgetValue("dof_intensity", 0.35);
+                setWidgetValue("contrast", 1.08);
+                setWidgetValue("exposure", 0.02);
+                setWidgetValue("temperature", 0.04);
+                setWidgetValue("saturation", 0.96);
                 setToggleState("enable_frequency_retouch", true);
                 setWidgetValue("skin_smooth", 0.30);
                 setWidgetValue("clarity", 0.12);
-                setToggleState("enable_sss", true);
-                setWidgetValue("sss_amount", 0.20);
-                setWidgetValue("sss_radius", 12);
-                setToggleState("enable_vignette", true);
-                setWidgetValue("vignette_amount", 0.22);
+                setToggleState("enable_relighting", true);
+                setToggleState("relight_use_depth", true);
+                setWidgetValue("light_intensity", 0.30);
+                setWidgetValue("light_x", 0.38);
+                setWidgetValue("light_y", 0.35);
+                setWidgetValue("light_z", 0.22);
+                setWidgetValue("light_radius", 0.80);
+                setWidgetValue("light_color_r", 1.02);
+                setWidgetValue("light_color_g", 0.97);
+                setWidgetValue("light_color_b", 0.90);
+                setToggleState("enable_shoulder", true);
+                setWidgetValue("shoulder_start", 0.70);
+                setWidgetValue("rolloff_softness", 0.85);
+                setWidgetValue("highlight_desat", 0.55);
+                setToggleState("enable_dof", true);
+                setWidgetValue("f_stop", "f/1.8");
+                setWidgetValue("dof_intensity", 0.30);
                 setToggleState("enable_grain", true);
-                setWidgetValue("grain_amount", 0.16);
+                setWidgetValue("grain_amount", 0.18);
                 setWidgetValue("grain_size", 1.3);
             }
         },
         {
             category: "💄 Portrait, Studio & High-End Editorial",
-            name: "⚡ Euphoria Neon Drench (A24 / HBO)",
+            name: "⚡ Euphoria Neon Drench (HBO)",
             desc: "Dual Violet/Cyan Color Split + Specular Amber Halation + Heavy Pro-Mist + Film Dynamic Range",
             apply: () => {
                 bypassAll();
                 setToggleState("enable_film_stock", true);
                 setWidgetValue("film_stock", "Kodak CineStill 800T");
-                setWidgetValue("stock_mix", 0.80);
+                setWidgetValue("stock_mix", 0.90);
                 setToggleState("enable_color_grade", true);
-                setWidgetValue("temperature", -0.12);
-                setWidgetValue("tint", 0.20);
                 setWidgetValue("contrast", 1.24);
+                setWidgetValue("exposure", 0.04);
+                setWidgetValue("temperature", -0.12);
+                setWidgetValue("tint", 0.25);
                 setWidgetValue("saturation", 1.35);
                 setToggleState("enable_relighting", true);
                 setToggleState("relight_use_depth", true);
-                setWidgetValue("light_intensity", 0.65);
+                setWidgetValue("light_intensity", 0.80);
                 setWidgetValue("light_x", 0.20);
-                setWidgetValue("light_y", 0.30);
+                setWidgetValue("light_y", 0.40);
                 setWidgetValue("light_z", 0.15);
-                setWidgetValue("light_radius", 0.75);
-                setWidgetValue("light_color_r", 1.25);
-                setWidgetValue("light_color_g", 0.35);
-                setWidgetValue("light_color_b", 1.10);
-                setToggleState("enable_halation", true);
-                setWidgetValue("halation_intensity", 0.48);
-                setWidgetValue("halation_spread", 28);
-                setWidgetValue("halation_amber_core", 0.60);
+                setWidgetValue("light_radius", 0.70);
+                setWidgetValue("light_color_r", 0.40);
+                setWidgetValue("light_color_g", 0.70);
+                setWidgetValue("light_color_b", 1.50);
                 setToggleState("enable_mist", true);
-                setWidgetValue("mist_intensity", 0.38);
+                setWidgetValue("mist_type", "Black Pro-Mist");
+                setWidgetValue("mist_intensity", 0.45);
                 setWidgetValue("mist_radius", 36);
+                setWidgetValue("mist_cutoff", 0.50);
+                setToggleState("enable_halation", true);
+                setWidgetValue("halation_intensity", 0.50);
+                setWidgetValue("halation_spread", 26);
+                setWidgetValue("halation_amber_core", 0.65);
                 setToggleState("enable_flare", true);
                 setWidgetValue("anamorphic_flare", 0.40);
                 setToggleState("enable_grain", true);
-                setWidgetValue("grain_amount", 0.20);
+                setWidgetValue("grain_amount", 0.22);
                 setWidgetValue("grain_size", 1.4);
+            }
+        },
+        {
+            category: "💄 Portrait, Studio & High-End Editorial",
+            name: "📷 Richard Avedon Studio B&W",
+            desc: "Kodak Tri-X 400 + High-Key Stark White Key + Razor Clarity Retouch + Intense Contrast",
+            apply: () => {
+                bypassAll();
+                setToggleState("enable_film_stock", true);
+                setWidgetValue("film_stock", "Kodak Tri-X 400 (B&W)");
+                setWidgetValue("stock_mix", 1.0);
+                setToggleState("enable_color_grade", true);
+                setWidgetValue("contrast", 1.38);
+                setWidgetValue("exposure", 0.12);
+                setWidgetValue("saturation", 0.0);
+                setToggleState("enable_frequency_retouch", true);
+                setWidgetValue("clarity", 0.40);
+                setWidgetValue("skin_smooth", 0.20);
+                setWidgetValue("smooth_radius", 6);
+                setToggleState("enable_shoulder", true);
+                setWidgetValue("shoulder_start", 0.80);
+                setWidgetValue("rolloff_softness", 0.55);
+                setWidgetValue("highlight_desat", 1.0);
+                setToggleState("enable_relighting", true);
+                setWidgetValue("light_intensity", 0.50);
+                setWidgetValue("light_x", 0.50);
+                setWidgetValue("light_y", 0.25);
+                setWidgetValue("light_z", 0.15);
+                setWidgetValue("light_radius", 1.10);
+                setWidgetValue("light_color_r", 1.10);
+                setWidgetValue("light_color_g", 1.10);
+                setWidgetValue("light_color_b", 1.10);
+                setToggleState("enable_vignette", true);
+                setWidgetValue("vignette_amount", 0.20);
+                setToggleState("enable_grain", true);
+                setWidgetValue("grain_amount", 0.26);
+                setWidgetValue("grain_size", 1.5);
+            }
+        },
+        {
+            category: "💄 Portrait, Studio & High-End Editorial",
+            name: "🌸 Korean Drama Soft Glow",
+            desc: "Fuji Pro 400H + Milky Pastel Lift + Gentle SSS Skin Bleed + Delicate Mist + f/1.4 Bokeh",
+            apply: () => {
+                bypassAll();
+                setToggleState("enable_film_stock", true);
+                setWidgetValue("film_stock", "Fuji Pro 400H");
+                setWidgetValue("stock_mix", 0.85);
+                setToggleState("enable_color_grade", true);
+                setWidgetValue("contrast", 0.95);
+                setWidgetValue("exposure", 0.12);
+                setWidgetValue("temperature", 0.06);
+                setWidgetValue("tint", -0.04);
+                setWidgetValue("saturation", 1.04);
+                setToggleState("enable_frequency_retouch", true);
+                setWidgetValue("skin_smooth", 0.50);
+                setWidgetValue("smooth_radius", 11);
+                setWidgetValue("clarity", 0.10);
+                setToggleState("enable_sss", true);
+                setWidgetValue("sss_amount", 0.35);
+                setWidgetValue("sss_radius", 18);
+                setWidgetValue("sss_tint_r", 1.05);
+                setWidgetValue("sss_tint_g", 0.30);
+                setWidgetValue("sss_tint_b", 0.12);
+                setToggleState("enable_mist", true);
+                setWidgetValue("mist_type", "White Diffusion / Fog");
+                setWidgetValue("mist_intensity", 0.32);
+                setWidgetValue("mist_radius", 30);
+                setWidgetValue("mist_cutoff", 0.55);
+                setToggleState("enable_dof", true);
+                setWidgetValue("f_stop", "f/1.4");
+                setWidgetValue("dof_intensity", 0.40);
+                setToggleState("enable_shoulder", true);
+                setWidgetValue("shoulder_start", 0.64);
+                setWidgetValue("rolloff_softness", 1.15);
+                setWidgetValue("highlight_desat", 0.40);
+                setToggleState("enable_grain", true);
+                setWidgetValue("grain_amount", 0.12);
+                setWidgetValue("grain_size", 1.1);
             }
         },
 
@@ -1640,7 +1981,7 @@ function buildDarkroomUI(node, root) {
         // -------------------------------------------------------------
         {
             category: "🎞️ Black & White Fine Art & Street",
-            name: "🎞️ Tri-X 400 Noir (Silver Gelatin)",
+            name: "🎞️ Kodak Tri-X 400 Noir (Silver Gelatin)",
             desc: "Monochrome Street Photography + Crushed Inky Blacks + Sharp Micro-Contrast + Tactile Grain",
             apply: () => {
                 bypassAll();
@@ -1648,48 +1989,48 @@ function buildDarkroomUI(node, root) {
                 setWidgetValue("film_stock", "Kodak Tri-X 400 (B&W)");
                 setWidgetValue("stock_mix", 1.0);
                 setToggleState("enable_color_grade", true);
-                setWidgetValue("contrast", 1.40);
-                setWidgetValue("exposure", -0.12);
-                setToggleState("enable_shoulder", true);
-                setWidgetValue("shoulder_start", 0.62);
-                setWidgetValue("rolloff_softness", 0.70);
-                setToggleState("enable_mist", true);
-                setWidgetValue("mist_intensity", 0.18);
-                setWidgetValue("mist_radius", 22);
+                setWidgetValue("contrast", 1.32);
+                setWidgetValue("exposure", -0.05);
+                setWidgetValue("saturation", 0.0);
+                setToggleState("enable_frequency_retouch", true);
+                setWidgetValue("clarity", 0.30);
                 setToggleState("enable_vignette", true);
-                setWidgetValue("vignette_amount", 0.48);
+                setWidgetValue("vignette_amount", 0.40);
                 setToggleState("enable_grain", true);
-                setWidgetValue("grain_amount", 0.45);
-                setWidgetValue("grain_size", 2.2);
+                setWidgetValue("grain_amount", 0.35);
+                setWidgetValue("grain_size", 1.8);
+                setWidgetValue("grain_shadows", 0.65);
+                setWidgetValue("grain_midtones", 1.05);
             }
         },
         {
             category: "🎞️ Black & White Fine Art & Street",
             name: "🏛️ Fine Art Platinum / Palladium",
-            desc: "Smooth Sepia-Toned Platinum Print + Wide Dynamic Shoulder + Delicate Medium Format Grain",
+            desc: "Ilford HP5 Plus + Smooth Sepia-Toned Platinum Print + Wide Dynamic Shoulder + Delicate Grain",
             apply: () => {
                 bypassAll();
                 setToggleState("enable_film_stock", true);
-                setWidgetValue("film_stock", "Kodak Tri-X 400 (B&W)");
-                setWidgetValue("stock_mix", 0.90);
+                setWidgetValue("film_stock", "Ilford HP5 Plus (B&W)");
+                setWidgetValue("stock_mix", 0.95);
                 setToggleState("enable_color_grade", true);
-                setWidgetValue("temperature", 0.12);
-                setWidgetValue("tint", 0.04);
-                setWidgetValue("contrast", 1.08);
-                setWidgetValue("exposure", 0.08);
+                setWidgetValue("contrast", 1.12);
+                setWidgetValue("exposure", 0.05);
+                setWidgetValue("temperature", 0.10);
+                setWidgetValue("tint", -0.02);
+                setWidgetValue("saturation", 0.15);
                 setToggleState("enable_shoulder", true);
-                setWidgetValue("shoulder_start", 0.55);
-                setWidgetValue("rolloff_softness", 1.30);
-                setWidgetValue("highlight_desat", 0.80);
-                setToggleState("enable_mist", true);
-                setWidgetValue("mist_type", "White Diffusion / Fog");
-                setWidgetValue("mist_intensity", 0.15);
-                setWidgetValue("mist_radius", 32);
-                setToggleState("enable_vignette", true);
-                setWidgetValue("vignette_amount", 0.25);
+                setWidgetValue("shoulder_start", 0.65);
+                setWidgetValue("rolloff_softness", 1.20);
+                setWidgetValue("highlight_desat", 0.85);
+                setToggleState("enable_atmosphere", true);
+                setWidgetValue("lift_blacks", 0.10);
+                setWidgetValue("haze_strength", 0.15);
+                setWidgetValue("haze_color_r", 0.18);
+                setWidgetValue("haze_color_g", 0.16);
+                setWidgetValue("haze_color_b", 0.14);
                 setToggleState("enable_grain", true);
-                setWidgetValue("grain_amount", 0.18);
-                setWidgetValue("grain_size", 1.2);
+                setWidgetValue("grain_amount", 0.20);
+                setWidgetValue("grain_size", 1.3);
             }
         },
         {
@@ -1698,28 +2039,91 @@ function buildDarkroomUI(node, root) {
             desc: "Desaturated Steel-Blue Tone + Overcast Fog Haze + Crisp Micro-Pore Texture + Subtle Lateral CA",
             apply: () => {
                 bypassAll();
+                setToggleState("enable_film_stock", true);
+                setWidgetValue("film_stock", "Fuji Superia 400");
+                setWidgetValue("stock_mix", 0.65);
                 setToggleState("enable_color_grade", true);
-                setWidgetValue("temperature", -0.30);
-                setWidgetValue("tint", 0.05);
-                setWidgetValue("saturation", 0.75);
-                setWidgetValue("contrast", 1.12);
+                setWidgetValue("contrast", 1.16);
                 setWidgetValue("exposure", -0.08);
+                setWidgetValue("temperature", -0.15);
+                setWidgetValue("tint", 0.06);
+                setWidgetValue("saturation", 0.65);
+                setToggleState("enable_frequency_retouch", true);
+                setWidgetValue("clarity", 0.28);
                 setToggleState("enable_atmosphere", true);
                 setToggleState("haze_use_depth", true);
+                setToggleState("light_wrap_use_depth", true);
                 setWidgetValue("haze_strength", 0.45);
-                setWidgetValue("lift_blacks", 0.14);
+                setWidgetValue("lift_blacks", 0.08);
+                setWidgetValue("depth_offset", 0.05);
                 setWidgetValue("haze_color_r", 0.14);
                 setWidgetValue("haze_color_g", 0.18);
-                setWidgetValue("haze_color_b", 0.24);
+                setWidgetValue("haze_color_b", 0.25);
+                setWidgetValue("light_wrap_strength", 0.30);
                 setToggleState("enable_lateral_ca", true);
-                setWidgetValue("lateral_ca", 0.005);
-                setToggleState("enable_frequency_retouch", true);
-                setWidgetValue("clarity", 0.25);
+                setWidgetValue("lateral_ca", 0.004);
                 setToggleState("enable_vignette", true);
-                setWidgetValue("vignette_amount", 0.30);
+                setWidgetValue("vignette_amount", 0.32);
                 setToggleState("enable_grain", true);
                 setWidgetValue("grain_amount", 0.22);
-                setWidgetValue("grain_size", 1.5);
+                setWidgetValue("grain_size", 1.4);
+            }
+        },
+        {
+            category: "🎞️ Black & White Fine Art & Street",
+            name: "📸 Henri Cartier-Bresson Street",
+            desc: "Ilford HP5 Plus + High Street Clarity + Decisive Moment Punch + Deep Organic Silver Halide",
+            apply: () => {
+                bypassAll();
+                setToggleState("enable_film_stock", true);
+                setWidgetValue("film_stock", "Ilford HP5 Plus (B&W)");
+                setWidgetValue("stock_mix", 1.0);
+                setToggleState("enable_color_grade", true);
+                setWidgetValue("contrast", 1.25);
+                setWidgetValue("exposure", 0.02);
+                setWidgetValue("saturation", 0.0);
+                setToggleState("enable_frequency_retouch", true);
+                setWidgetValue("clarity", 0.35);
+                setWidgetValue("skin_smooth", 0.15);
+                setToggleState("enable_shoulder", true);
+                setWidgetValue("shoulder_start", 0.70);
+                setWidgetValue("rolloff_softness", 0.80);
+                setWidgetValue("highlight_desat", 1.0);
+                setToggleState("enable_vignette", true);
+                setWidgetValue("vignette_amount", 0.45);
+                setToggleState("enable_grain", true);
+                setWidgetValue("grain_amount", 0.36);
+                setWidgetValue("grain_size", 1.9);
+                setWidgetValue("grain_shadows", 0.60);
+                setWidgetValue("grain_midtones", 1.10);
+            }
+        },
+        {
+            category: "🎞️ Black & White Fine Art & Street",
+            name: "🌑 High Contrast Graphic B&W",
+            desc: "Kodak Tri-X 400 Pushed + Blown Specular Highlights + Crushed Pitch Blacks + Stark Graphic Drama",
+            apply: () => {
+                bypassAll();
+                setToggleState("enable_film_stock", true);
+                setWidgetValue("film_stock", "Kodak Tri-X 400 (B&W)");
+                setWidgetValue("stock_mix", 1.0);
+                setToggleState("enable_color_grade", true);
+                setWidgetValue("contrast", 1.55);
+                setWidgetValue("exposure", 0.10);
+                setWidgetValue("saturation", 0.0);
+                setToggleState("enable_frequency_retouch", true);
+                setWidgetValue("clarity", 0.45);
+                setToggleState("enable_shoulder", true);
+                setWidgetValue("shoulder_start", 0.82);
+                setWidgetValue("rolloff_softness", 0.40);
+                setWidgetValue("highlight_desat", 1.0);
+                setToggleState("enable_vignette", true);
+                setWidgetValue("vignette_amount", 0.50);
+                setToggleState("enable_grain", true);
+                setWidgetValue("grain_amount", 0.42);
+                setWidgetValue("grain_size", 2.0);
+                setWidgetValue("grain_shadows", 0.70);
+                setWidgetValue("grain_midtones", 1.20);
             }
         },
 
@@ -1729,46 +2133,63 @@ function buildDarkroomUI(node, root) {
         {
             category: "🌸 Atmospheric, Dreamcore & Passthrough",
             name: "🌸 Pastel Japanese Indie",
-            desc: "Fuji 400H + Milky Lifted Shadows + Soft White Fog Mist + High Key Exposure + Gentle Grain",
+            desc: "Fuji Pro 400H + Milky Lifted Shadows + Soft White Fog Mist + High Key Exposure + Gentle Grain",
             apply: () => {
                 bypassAll();
                 setToggleState("enable_film_stock", true);
                 setWidgetValue("film_stock", "Fuji Pro 400H");
-                setWidgetValue("stock_mix", 0.95);
+                setWidgetValue("stock_mix", 0.90);
                 setToggleState("enable_color_grade", true);
-                setWidgetValue("exposure", 0.35);
-                setWidgetValue("contrast", 0.85);
-                setWidgetValue("saturation", 0.90);
-                setWidgetValue("temperature", -0.04);
-                setWidgetValue("tint", 0.08);
+                setWidgetValue("contrast", 0.92);
+                setWidgetValue("exposure", 0.15);
+                setWidgetValue("temperature", 0.04);
+                setWidgetValue("tint", -0.06);
+                setWidgetValue("saturation", 0.95);
+                setToggleState("enable_atmosphere", true);
+                setWidgetValue("lift_blacks", 0.16);
+                setWidgetValue("haze_strength", 0.35);
+                setWidgetValue("haze_color_r", 0.22);
+                setWidgetValue("haze_color_g", 0.24);
+                setWidgetValue("haze_color_b", 0.26);
                 setToggleState("enable_mist", true);
                 setWidgetValue("mist_type", "White Diffusion / Fog");
-                setWidgetValue("mist_intensity", 0.36);
-                setWidgetValue("mist_radius", 44);
+                setWidgetValue("mist_intensity", 0.35);
+                setWidgetValue("mist_radius", 35);
+                setWidgetValue("mist_cutoff", 0.50);
                 setToggleState("enable_shoulder", true);
-                setWidgetValue("shoulder_start", 0.62);
-                setWidgetValue("rolloff_softness", 1.25);
+                setWidgetValue("shoulder_start", 0.65);
+                setWidgetValue("rolloff_softness", 1.10);
+                setWidgetValue("highlight_desat", 0.45);
                 setToggleState("enable_grain", true);
-                setWidgetValue("grain_amount", 0.14);
-                setWidgetValue("grain_size", 1.1);
+                setWidgetValue("grain_amount", 0.16);
+                setWidgetValue("grain_size", 1.2);
             }
         },
         {
             category: "🌸 Atmospheric, Dreamcore & Passthrough",
             name: "✨ Dreamcore 90s Nostalgia",
-            desc: "Lush White Fog Bloom + Chromatic Edge Fringing + Pastel Lifted Blacks + Anamorphic Streaks",
+            desc: "Agfa Vista 200 + Lush White Fog Bloom + Chromatic Edge Fringing + Pastel Lifted Blacks + Anamorphic",
             apply: () => {
                 bypassAll();
+                setToggleState("enable_film_stock", true);
+                setWidgetValue("film_stock", "Agfa Vista 200");
+                setWidgetValue("stock_mix", 0.85);
                 setToggleState("enable_color_grade", true);
-                setWidgetValue("exposure", 0.22);
-                setWidgetValue("contrast", 0.88);
-                setWidgetValue("saturation", 1.15);
+                setWidgetValue("contrast", 0.96);
+                setWidgetValue("exposure", 0.10);
                 setWidgetValue("temperature", 0.08);
-                setWidgetValue("tint", 0.06);
+                setWidgetValue("saturation", 1.05);
+                setToggleState("enable_atmosphere", true);
+                setWidgetValue("lift_blacks", 0.14);
+                setWidgetValue("haze_strength", 0.30);
+                setWidgetValue("haze_color_r", 0.25);
+                setWidgetValue("haze_color_g", 0.23);
+                setWidgetValue("haze_color_b", 0.26);
                 setToggleState("enable_mist", true);
                 setWidgetValue("mist_type", "White Diffusion / Fog");
                 setWidgetValue("mist_intensity", 0.48);
                 setWidgetValue("mist_radius", 52);
+                setWidgetValue("mist_cutoff", 0.45);
                 setToggleState("enable_flare", true);
                 setWidgetValue("anamorphic_flare", 0.50);
                 setToggleState("enable_lateral_ca", true);
@@ -1776,9 +2197,139 @@ function buildDarkroomUI(node, root) {
                 setToggleState("enable_shoulder", true);
                 setWidgetValue("shoulder_start", 0.60);
                 setWidgetValue("rolloff_softness", 1.20);
+                setWidgetValue("highlight_desat", 0.35);
                 setToggleState("enable_grain", true);
                 setWidgetValue("grain_amount", 0.26);
                 setWidgetValue("grain_size", 1.6);
+            }
+        },
+        {
+            category: "🌸 Atmospheric, Dreamcore & Passthrough",
+            name: "🌊 2000s Hollywood Teal & Orange",
+            desc: "Kodak Vision3 500T + Blockbuster Complementary Separation + Warm Skin Tones + Deep Teal Shadows",
+            apply: () => {
+                bypassAll();
+                setToggleState("enable_film_stock", true);
+                setWidgetValue("film_stock", "Kodak Vision3 500T");
+                setWidgetValue("stock_mix", 0.95);
+                setToggleState("enable_color_grade", true);
+                setWidgetValue("contrast", 1.20);
+                setWidgetValue("exposure", 0.02);
+                setWidgetValue("temperature", -0.06);
+                setWidgetValue("tint", 0.08);
+                setWidgetValue("saturation", 1.18);
+                setToggleState("enable_relighting", true);
+                setToggleState("relight_use_depth", true);
+                setWidgetValue("light_intensity", 0.55);
+                setWidgetValue("light_x", 0.45);
+                setWidgetValue("light_y", 0.35);
+                setWidgetValue("light_z", 0.20);
+                setWidgetValue("light_radius", 0.85);
+                setWidgetValue("light_color_r", 1.30);
+                setWidgetValue("light_color_g", 0.88);
+                setWidgetValue("light_color_b", 0.55);
+                setToggleState("enable_atmosphere", true);
+                setToggleState("haze_use_depth", true);
+                setWidgetValue("haze_strength", 0.30);
+                setWidgetValue("lift_blacks", 0.05);
+                setWidgetValue("haze_color_r", 0.06);
+                setWidgetValue("haze_color_g", 0.16);
+                setWidgetValue("haze_color_b", 0.22);
+                setToggleState("enable_halation", true);
+                setWidgetValue("halation_intensity", 0.35);
+                setWidgetValue("halation_spread", 22);
+                setWidgetValue("halation_amber_core", 0.70);
+                setToggleState("enable_vignette", true);
+                setWidgetValue("vignette_amount", 0.28);
+                setToggleState("enable_grain", true);
+                setWidgetValue("grain_amount", 0.20);
+                setWidgetValue("grain_size", 1.3);
+            }
+        },
+        {
+            category: "🌸 Atmospheric, Dreamcore & Passthrough",
+            name: "☁️ Overcast London Moody",
+            desc: "Kodak Portra 800 + Desaturated Slate-Gray & Olive Tones + Lifted Dynamic Blacks + Soft Light Wrap",
+            apply: () => {
+                bypassAll();
+                setToggleState("enable_film_stock", true);
+                setWidgetValue("film_stock", "Kodak Portra 800");
+                setWidgetValue("stock_mix", 0.80);
+                setToggleState("enable_color_grade", true);
+                setWidgetValue("contrast", 1.05);
+                setWidgetValue("exposure", -0.05);
+                setWidgetValue("temperature", -0.08);
+                setWidgetValue("tint", 0.06);
+                setWidgetValue("saturation", 0.75);
+                setToggleState("enable_atmosphere", true);
+                setToggleState("haze_use_depth", true);
+                setToggleState("light_wrap_use_depth", true);
+                setWidgetValue("haze_strength", 0.40);
+                setWidgetValue("lift_blacks", 0.12);
+                setWidgetValue("depth_offset", 0.04);
+                setWidgetValue("haze_color_r", 0.16);
+                setWidgetValue("haze_color_g", 0.18);
+                setWidgetValue("haze_color_b", 0.20);
+                setWidgetValue("light_wrap_strength", 0.38);
+                setToggleState("enable_mist", true);
+                setWidgetValue("mist_type", "Black Pro-Mist");
+                setWidgetValue("mist_intensity", 0.20);
+                setWidgetValue("mist_radius", 25);
+                setWidgetValue("mist_cutoff", 0.60);
+                setToggleState("enable_vignette", true);
+                setWidgetValue("vignette_amount", 0.30);
+                setToggleState("enable_grain", true);
+                setWidgetValue("grain_amount", 0.22);
+                setWidgetValue("grain_size", 1.4);
+            }
+        },
+        {
+            category: "🌸 Atmospheric, Dreamcore & Passthrough",
+            name: "🌙 Blue Hour Twilight",
+            desc: "Fuji Superia 400 + Deep Cobalt Twilight Sky + Warm Interior Light Wrap + Gentle Mist + f/2.0 Bokeh",
+            apply: () => {
+                bypassAll();
+                setToggleState("enable_film_stock", true);
+                setWidgetValue("film_stock", "Fuji Superia 400");
+                setWidgetValue("stock_mix", 0.85);
+                setToggleState("enable_color_grade", true);
+                setWidgetValue("contrast", 1.18);
+                setWidgetValue("exposure", -0.10);
+                setWidgetValue("temperature", -0.22);
+                setWidgetValue("tint", 0.05);
+                setWidgetValue("saturation", 1.08);
+                setToggleState("enable_relighting", true);
+                setToggleState("relight_use_depth", true);
+                setWidgetValue("light_intensity", 0.70);
+                setWidgetValue("light_x", 0.30);
+                setWidgetValue("light_y", 0.45);
+                setWidgetValue("light_z", 0.22);
+                setWidgetValue("light_radius", 0.75);
+                setWidgetValue("light_color_r", 1.40);
+                setWidgetValue("light_color_g", 0.90);
+                setWidgetValue("light_color_b", 0.40);
+                setToggleState("enable_atmosphere", true);
+                setToggleState("haze_use_depth", true);
+                setToggleState("light_wrap_use_depth", true);
+                setWidgetValue("haze_strength", 0.45);
+                setWidgetValue("lift_blacks", 0.06);
+                setWidgetValue("depth_offset", 0.06);
+                setWidgetValue("haze_color_r", 0.08);
+                setWidgetValue("haze_color_g", 0.12);
+                setWidgetValue("haze_color_b", 0.30);
+                setWidgetValue("light_wrap_strength", 0.40);
+                setToggleState("enable_dof", true);
+                setWidgetValue("f_stop", "f/2.0");
+                setWidgetValue("dof_intensity", 0.30);
+                setToggleState("enable_halation", true);
+                setWidgetValue("halation_intensity", 0.30);
+                setWidgetValue("halation_spread", 20);
+                setWidgetValue("halation_amber_core", 0.60);
+                setToggleState("enable_vignette", true);
+                setWidgetValue("vignette_amount", 0.35);
+                setToggleState("enable_grain", true);
+                setWidgetValue("grain_amount", 0.24);
+                setWidgetValue("grain_size", 1.4);
             }
         },
         {
@@ -1828,6 +2379,57 @@ function buildDarkroomUI(node, root) {
 
     pPresets.appendChild(masterPresetCard);
 
+    // Full Node State Synchronizer
+    node._syncPhotoLabDOM = function () {
+        // Ensure any exploded height from saved workflow or LiteGraph widget accumulation is clamped
+        if (node.size && (node.size[1] > 1050 || node.size[1] < 600)) {
+            node.size[1] = 760;
+            node.setSize?.([node.size[0] || 640, 760]);
+        }
+
+        // Ensure raw canvas widgets stay hidden
+        if (node.widgets && Array.isArray(node.widgets)) {
+            for (const w of node.widgets) {
+                if (w && w.name !== "mrweaz_photolab_ui") {
+                    hideWidget(w);
+                }
+            }
+        }
+
+        // 1. Sync all feature card switches from widgets and properties
+        for (const name in cardControllers) {
+            const w = getWidget(node, name);
+            let val = false;
+            if (w && w.value !== undefined && w.value !== null) {
+                val = Boolean(w.value);
+            } else if (node.properties?._pl_toggles?.[name] !== undefined) {
+                val = Boolean(node.properties._pl_toggles[name]);
+            }
+            if (node.properties) {
+                node.properties._pl_toggles = node.properties._pl_toggles || {};
+                node.properties._pl_toggles[name] = val;
+            }
+            try {
+                cardControllers[name].updateState(val);
+            } catch (e) {}
+        }
+
+        // 2. Sync all sliders, selects, textareas, seeds from widgets
+        for (const name in sliderSynchronizers) {
+            const w = getWidget(node, name);
+            if (w && w.value !== undefined && w.value !== null) {
+                try {
+                    sliderSynchronizers[name](w.value);
+                } catch (e) {}
+            }
+        }
+
+        // 3. Update status pill, tab dots, footer badges
+        try {
+            updateActiveState();
+        } catch (e) {}
+    };
+
     // Initial State Sync
-    updateActiveState();
+    node._syncPhotoLabDOM();
 }
