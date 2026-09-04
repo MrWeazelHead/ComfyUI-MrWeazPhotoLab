@@ -2,7 +2,9 @@
 
 A high-performance ComfyUI custom node suite engineered specifically for **authentic photography processing**, darkroom color science, physical optical lens bench, 3D depth-aware effects, and micro-detail neural diffusion retouching.
 
-All capabilities are unified into a single interactive master powerhouse node: **`MrWeaz - PhotoLab`** (`PhotoLabMasterSuite`).
+
+<img width="1860" height="1664" alt="ComfyUI_temp_gamck_00003_" src="https://github.com/user-attachments/assets/ad77ec79-1c0f-4cf2-8695-687da7df97f7" />
+
 
 ---
 
