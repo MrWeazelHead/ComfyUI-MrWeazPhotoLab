@@ -192,7 +192,8 @@ class PhotoLabMasterSuite:
                 "auto_depth": ("BOOLEAN", {"default": True}),
 
                 # --- Auto-Masking & SAM Engine ---
-                "auto_mask": (["Disabled", "SAM Auto-Subject", "Depth Foreground Isolation", "Skin & Portrait Tones", "Specular Highlights", "Shadows & Blacks"], {"default": "Disabled"}),
+                "enable_mask": ("BOOLEAN", {"default": False}),
+                "auto_mask": (["SAM Auto-Subject", "Depth Foreground Isolation", "Skin & Portrait Tones", "Specular Highlights", "Shadows & Blacks"], {"default": "SAM Auto-Subject"}),
                 "sam_prompt": ("STRING", {"default": "subject"}),
                 "sam_model": (sam_models, {"default": sam_models[0]}),
                 "sam_point_x": ("FLOAT", {"default": 0.50, "min": 0.0, "max": 1.0, "step": 0.01}),
@@ -724,7 +725,8 @@ class PhotoLabMasterSuite:
         self,
         image=None,
         auto_depth=True,
-        auto_mask="Disabled",
+        enable_mask=False,
+        auto_mask="SAM Auto-Subject",
         sam_prompt="subject",
         sam_model="None",
         sam_point_x=0.50,
@@ -914,15 +916,10 @@ class PhotoLabMasterSuite:
         # STEP 1.6: Active Mask Resolution (SAM / Heuristics / Inversion / Feather)
         # -------------------------------------------------------------
         user_mask = self._normalize_mask(mask, B, H, W, device) if mask is not None else None
-        
-        prompt_txt = (sam_prompt or "").strip().lower()
-        eff_auto_mask = auto_mask
-        if eff_auto_mask == "Disabled" and prompt_txt and prompt_txt not in ("none", "disabled", "off", ""):
-            eff_auto_mask = "SAM Auto-Subject"
 
-        if eff_auto_mask != "Disabled":
+        if enable_mask:
             auto_m = self._generate_auto_mask(
-                mode=eff_auto_mask,
+                mode=auto_mask,
                 img_bhwc=img,
                 depth_mask=depth_mask,
                 sam_model_name=sam_model,
@@ -939,8 +936,7 @@ class PhotoLabMasterSuite:
         else:
             active_mask = user_mask
 
-        should_invert = invert_mask or any(k in prompt_txt for k in ["background", "backdrop", "sky", "scenery", "wall", "environment", "room", "surroundings"])
-        if active_mask is not None and should_invert:
+        if active_mask is not None and invert_mask:
             active_mask = torch.clamp(1.0 - active_mask, 0.0, 1.0)
 
 

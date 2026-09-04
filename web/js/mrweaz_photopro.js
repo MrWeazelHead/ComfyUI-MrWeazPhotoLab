@@ -527,14 +527,6 @@ function buildDarkroomUI(node, root) {
 
         const handleVal = (val) => {
             setWidgetValue(widgetName, val);
-            if (widgetName === "sam_prompt" && val && val.trim()) {
-                const currentMode = getWidgetVal("auto_mask", "Disabled");
-                if (currentMode === "Disabled") {
-                    setWidgetValue("auto_mask", "SAM Auto-Subject");
-                    const sel = parent.querySelector("select");
-                    if (sel) sel.value = "SAM Auto-Subject";
-                }
-            }
         };
 
         ta.addEventListener("input", (e) => handleVal(e.target.value));
@@ -641,10 +633,10 @@ function buildDarkroomUI(node, root) {
     const pRetouch = tabPanels["retouch"];
 
     // Card 0: Auto-Masking & SAM Engine
-    const bMask = createFeatureCard(pRetouch, "Auto-Masking & SAM Engine", "🎯", null);
+    const bMask = createFeatureCard(pRetouch, "Auto-Masking & SAM Engine", "🎯", "enable_mask");
     const autoMaskW = node.widgets?.find(w => w && w.name === "auto_mask");
     const autoMaskList = autoMaskW?.options?.values || [
-        "Disabled", "SAM Auto-Subject", "Depth Foreground Isolation", "Skin & Portrait Tones", "Specular Highlights", "Shadows & Blacks"
+        "SAM Auto-Subject", "Depth Foreground Isolation", "Skin & Portrait Tones", "Specular Highlights", "Shadows & Blacks"
     ];
     createSelect(bMask, "Auto-Mask Mode", "auto_mask", autoMaskList);
     createTextarea(bMask, "SAM Prompt / Target", "sam_prompt");
@@ -686,11 +678,8 @@ function buildDarkroomUI(node, root) {
         chip.title = `Prompt SAM for: ${c.val}`;
         chip.addEventListener("click", () => {
             setWidgetValue("sam_prompt", c.val);
-            setWidgetValue("auto_mask", "SAM Auto-Subject");
             const ta = bMask.querySelector(".pl-textarea");
             if (ta) ta.value = c.val;
-            const sel = bMask.querySelector("select");
-            if (sel) sel.value = "SAM Auto-Subject";
         });
         chipRow.appendChild(chip);
     });
