@@ -69,44 +69,6 @@ The node integrates local neural depth estimation powered by `Intel/zoedepth-nyu
 
 ---
 
-## 🎬 22 Curated Master Looks & Film Presets
-
-Tab 5 provides instant one-click professional configurations across 5 curated categories with baseline resets to prevent look contamination:
-
-### 🎬 Iconic Cinema & Directorial Looks
-1. `🎬 35mm Hollywood Panavision`: Kodak Portra 400 + Dynamic Shoulder + Amber/Red Halation + 35mm Grain + Anamorphic Streak + Vignette.
-2. `🌌 Blade Runner 2049 (Dystopian Amber)`: Sodium Vapor 3D Key Light + Cool Cyan Fill + Dense Volumetric Depth Haze + CineStill + Anamorphic Flare.
-3. `🏜️ Dune Arrakis Spice (Villeneuve / Fraser)`: Bleached Sun Exposure + Ochre Dust Volumetric Haze + Warm Sand Relight + 65mm IMAX Scale.
-4. `🛸 Kubrick 2001 (Clinical Sci-Fi)`: Cold Analytic Balance + Clinical High-Key Exposure + Razor Contrast + Clean Low Grain.
-5. `🕶️ Fincher Green Tungsten (Mindhunter)`: Moody Fluorescent Olive Grade + Crushed Inky Blacks + Piercing Texture Clarity + Vignette.
-6. `🩸 Dario Argento Giallo (1970s Horror)`: Saturated Crimson Gel 3D Relighting + Deep Noir Shadows + Intense Halation + Black Pro-Mist.
-7. `🏎️ Wes Anderson Pastel Symmetry`: Vibrant Custard Yellow & Mint Palette + Flat Low Contrast + Soft Fog Diffusion + Crisp Geometry.
-
-### 📸 Photochemical Film Stocks & Vintage
-8. `🌃 Neo-Tokyo Cyberpunk`: CineStill 800T + Electric Cyan/Magenta Split + Intense Amber Halation + Anamorphic Streak + Pro-Mist.
-9. `🎥 16mm French New Wave`: Fuji 400H + 35mm Prime Distortion + Chromatic Aberration + Gritty 16mm Silver Grain.
-10. `📸 1970s Kodachrome 64`: Warm Golden Yellow/Red Color Punch + Rich Contrast + Natural Vintage Vignette + Grain.
-11. `🍭 Technicolor Three-Strip (1950s)`: Vibrant Dye-Transfer Saturation + Rich Golden Glow Halation + Soft Shoulder + 35mm Grain.
-12. `☕ 90s Seattle Grunge & Coffeehouse`: Warm Earthy Olive/Ochre Tones + Lifted Dynamic Toe + Portra Warmth + Intimate 35mm Grain.
-
-### 💄 Portrait, Studio & High-End Editorial
-13. `💄 Vogue High-Fashion Editorial`: Pore-Locking Retouch + SSS Red Bleed + 3D Key/Rim Light + Soft Shoulder Rolloff + Crisp Grain.
-14. `🌅 Golden Hour Nat-Geo`: Warm Sun Rim Light + Atmospheric Depth Rayleigh Haze + Light Wrap + f/2.0 Disc Bokeh.
-15. `💎 Modern A24 Drama`: Pristine Kodak Portra 400 + Natural Organic Relight + Shallow f/1.8 Bokeh + True Filmic Curve.
-16. `⚡ Euphoria Neon Drench (A24 / HBO)`: Dual Violet/Cyan Color Split + Specular Amber Halation + Heavy Pro-Mist + Film Dynamic Range.
-
-### 🎞️ Black & White Fine Art & Street
-17. `🎞️ Tri-X 400 Noir (Silver Gelatin)`: Monochrome Street Photography + Crushed Inky Blacks + Sharp Micro-Contrast + Tactile Grain.
-18. `🏛️ Fine Art Platinum / Palladium`: Smooth Sepia-Toned Platinum Print + Wide Dynamic Shoulder + Delicate Medium Format Grain.
-19. `🌊 Nordic Melancholy (Scandi Noir)`: Desaturated Steel-Blue Tone + Overcast Fog Haze + Crisp Micro-Pore Texture + Subtle Lateral CA.
-
-### 🌸 Atmospheric, Dreamcore & Passthrough
-20. `🌸 Pastel Japanese Indie`: Fuji 400H + Milky Lifted Shadows + Soft White Fog Mist + High Key Exposure + Gentle Grain.
-21. `✨ Dreamcore 90s Nostalgia`: Lush White Fog Bloom + Chromatic Edge Fringing + Pastel Lifted Blacks + Anamorphic Streaks.
-22. `⚪ Ultra Clean Passthrough`: Turn all processing modules OFF for pure unadjusted canvas reference.
-
----
-
 ## 🚀 Installation & Setup
 
 1. Place this repository into your ComfyUI `custom_nodes` directory:
