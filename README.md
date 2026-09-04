@@ -73,7 +73,7 @@ The node integrates local neural depth estimation powered by `Intel/zoedepth-nyu
 
 1. Place this repository into your ComfyUI `custom_nodes` directory:
    ```bash
-   custom_nodes/ComfyUI-MrWeazPhotoPro/
+   git clone https://github.com/MrWeazelHead/ComfyUI-MrWeazPhotoLab.git
    ```
 2. Place any `.cube` LUT files into `models/luts/` (created automatically).
 3. In ComfyUI, add node: **`MrWeaz - PhotoLab`** (under category `MrWeazNodes/PhotoLab`).
